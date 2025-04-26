@@ -7,7 +7,7 @@ from difflib import get_close_matches
 
 st.set_page_config(page_title="🎓 Kerala College Chatbot", layout="wide")
 
-# 🔐 Load API keys from Streamlit secrets (for Streamlit Cloud)
+# 🔐 Load Groq API keys securely from Streamlit Cloud secrets
 PRIMARY_GROQ_KEY = st.secrets.get("GROQ_API_KEY", "")
 BACKUP_KEYS = st.secrets.get("GROQ_BACKUP_API_KEYS", "").split(",")
 ALL_GROQ_KEYS = [PRIMARY_GROQ_KEY] + [k.strip() for k in BACKUP_KEYS if k.strip()]
@@ -64,15 +64,10 @@ def load_colleges():
             all_courses += [c.strip() for c in (ug + " " + pg).split(",") if c.strip()]
         data["courses"] = all_courses
 
-        # Improved category tagging
+        # Category tagging
         text_lower = data["text"].lower()
         name_lower = data["name"].lower()
-
-        if (
-            "engineering" in name_lower
-            or any("btech" in c.lower() for c in data["courses"])
-            or "ktu" in text_lower
-        ):
+        if "engineering" in name_lower or any("btech" in c.lower() for c in data["courses"]) or "ktu" in text_lower:
             data["keywords"].add("engineering")
             data["category"] = "engineering"
         elif "applied science" in name_lower:
@@ -81,7 +76,6 @@ def load_colleges():
         elif "thss" in name_lower or "technical higher secondary" in name_lower:
             data["keywords"].add("thss")
             data["category"] = "thss"
-
         colleges.append(data)
     return colleges
 
@@ -121,10 +115,10 @@ def chunk_college_data(matches, max_chars=3000):
 def call_llama(query, context, max_retries=3):
     url = "https://api.groq.com/openai/v1/chat/completions"
     system_prompt = (
-        "You are a helpful assistant for students asking about colleges in Kerala. "
-        "Only answer using the provided context. Do not guess or add anything outside the data."
+        "You are a strict assistant for answering college-related queries using ONLY the provided context. "
+        "Do NOT guess or invent. If the information is missing, clearly say it's not found."
     )
-    user_prompt = f"User query: {query}\n\nMatching college info:\n{context}\n\nNow provide the best answer."
+    user_prompt = f"User query: {query}\n\n🔒 STRICT CONTEXT:\n{context}\n\nAnswer based only on the info above."
 
     payload = {
         "model": "llama3-70b-8192",
@@ -132,7 +126,7 @@ def call_llama(query, context, max_retries=3):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "temperature": 0.5
+        "temperature": 0.0
     }
 
     for groq_key in ALL_GROQ_KEYS:
@@ -157,23 +151,18 @@ def call_llama(query, context, max_retries=3):
 def generate_answer_llama(query, matches):
     st.session_state["shown_llama_wait_message"] = False
 
-    # Filter by category if present in query
-    category_filter = None
+    if not matches:
+        return "❌ Sorry, I couldn't find any matching college in the dataset."
+
     q = query.lower()
-    if "engineering" in q:
-        category_filter = "engineering"
-    elif "applied science" in q:
-        category_filter = "applied science"
-    elif "thss" in q or "technical higher secondary" in q:
-        category_filter = "thss"
+    category_filter = "engineering" if "engineering" in q else \
+                      "applied science" if "applied science" in q else \
+                      "thss" if "thss" in q or "technical higher secondary" in q else None
 
     if category_filter:
         filtered = [c for c in matches if c["category"] == category_filter]
         if filtered:
             matches = filtered
-
-    if not matches:
-        return "❌ Sorry, I couldn't find any matching college in the dataset."
 
     if len(matches) == 1:
         return call_llama(query, matches[0]["text"])
@@ -183,25 +172,22 @@ def generate_answer_llama(query, matches):
     combined = "\n\n".join(partials)
 
     summary_prompt = (
-        f"You are a helpful assistant summarizing college information for a student.\n\n"
+        f"You are summarizing verified college data only.\n\n"
         f"Context:\n{combined}\n\n"
         f"User query: {query}\n\n"
-        "✅ Summarize each college clearly one per line using this format:\n"
-        "• [College Name], [District] - Offers [courses].\n"
-        "👉 Use proper line breaks. Each college must be on its own line.\n"
-        "📌 Do not add colleges not found in the context above.\n"
+        "✅ Summarize ONLY using the info above.\n"
+        "• Use one bullet per college like: [College Name], [District] - Offers [courses].\n"
+        "❌ Do NOT guess. ❌ Do NOT add anything not in context."
     )
-
     return call_llama(query, summary_prompt)
 
-# App state
+# UI Setup
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
 if "colleges" not in st.session_state:
     st.session_state.colleges = load_colleges()
 
-# UI
 st.markdown("<h1 style='text-align:center;'>🎓 Kerala College Info Chatbot</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align:center;'>Ask about colleges, courses, or principal info in Kerala.</p>", unsafe_allow_html=True)
 
@@ -218,7 +204,7 @@ if submitted and user_input:
     st.session_state.chat_history.append(("user", user_input))
     st.session_state.chat_history.append(("bot", response))
 
-# Chat display
+# Chat UI
 st.markdown("### 💬 Conversation")
 for sender, msg in st.session_state.chat_history:
     color = "#64b5f6" if sender == "user" else "#2196f3"
@@ -233,7 +219,7 @@ for sender, msg in st.session_state.chat_history:
         unsafe_allow_html=True
     )
 
-# Utilities
+# Chat actions
 col1, col2 = st.columns(2)
 with col1:
     if st.button("🧹 Clear Chat"):
