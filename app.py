@@ -11,7 +11,7 @@ import faiss
 from sentence_transformers import SentenceTransformer
 from multiprocessing import Pool, cpu_count
 
-# --- Page Config ---
+# --- Streamlit Configuration ---
 st.set_page_config(
     page_title="🎓 College Info Assistant",
     page_icon="🤖",
@@ -19,56 +19,43 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- Custom CSS Styling ---
+# --- Custom CSS for UI Styling ---
 st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap');
-
-    html, body, [class*="css"]  {
-        font-family: 'Inter', sans-serif;
+    body {
+        font-family: 'Segoe UI', sans-serif;
+        background-color: #f7f9fc;
+    }
+    .main {
         background-color: #f0f2f6;
-        color: #1c1c1e;
-    }
-
-    .dark-mode body {
-        background-color: #1e1e1e !important;
-        color: #f5f5f5 !important;
-    }
-
-    .stChatMessage {
-        background-color: #ffffff;
+        padding: 2rem;
         border-radius: 12px;
-        padding: 12px 16px;
-        margin-bottom: 10px;
-        box-shadow: 0px 2px 6px rgba(0,0,0,0.05);
     }
-
-    .stChatMessage.user {
-        background-color: #e8f0fe;
-    }
-
-    .stChatMessage.assistant {
-        background-color: #e6f4ea;
-    }
-
-    .css-18ni7ap.e8zbici2 {  /* sidebar header */
-        color: #0a84ff;
-    }
-
-    .css-1v3fvcr {
+    .block-container {
         padding-top: 1rem;
     }
-
+    .chat-message {
+        padding: 1rem;
+        border-radius: 12px;
+        margin-bottom: 1rem;
+        font-size: 16px;
+        line-height: 1.6;
+    }
+    .chat-message.user {
+        background-color: #dbeafe;
+        border-left: 6px solid #3b82f6;
+    }
+    .chat-message.assistant {
+        background-color: #ecfdf5;
+        border-left: 6px solid #10b981;
+    }
+    .sidebar .stButton > button {
+        width: 100%;
+    }
     </style>
 """, unsafe_allow_html=True)
 
-# --- Secrets ---
-API_KEYS = [
-    st.secrets["OPENROUTER_API_KEY_1"],
-    st.secrets["OPENROUTER_API_KEY_2"]
-]
-
-# --- UI States ---
+# --- Session State Init ---
 if "dark_mode" not in st.session_state:
     st.session_state["dark_mode"] = False
 if "api_key_index" not in st.session_state:
@@ -76,37 +63,14 @@ if "api_key_index" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
 
-# --- Memory File ---
+# --- Secrets ---
+API_KEYS = [
+    st.secrets["OPENROUTER_API_KEY_1"],
+    st.secrets["OPENROUTER_API_KEY_2"]
+]
+
+# --- Files and Configs ---
 MEMORY_FILE = "chat_memory.json"
-if os.path.exists(MEMORY_FILE):
-    with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-        st.session_state["messages"] = json.load(f)
-
-# --- Sidebar ---
-with st.sidebar:
-    st.markdown("## ⚙️ Settings")
-    st.session_state["dark_mode"] = st.toggle("🌙 Dark Mode", value=st.session_state["dark_mode"])
-    if st.session_state["dark_mode"]:
-        st.markdown("<style>body { background-color: #1e1e1e; color: white; }</style>", unsafe_allow_html=True)
-
-    st.header("🕑 Chat History")
-    if st.session_state["messages"]:
-        for m in st.session_state["messages"]:
-            st.markdown(f"**{m['role'].capitalize()}**: {m['content'][:30]}...")
-    else:
-        st.markdown("*No chats yet.*")
-
-    if st.button("🧹 Clear Chat"):
-        st.session_state["messages"] = []
-        save_memory()
-        st.success("Chat history cleared!")
-        st.stop()
-
-    if st.button("📥 Download Chat"):
-        chat_text = "\n\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state["messages"]])
-        st.download_button("Download as TXT", data=chat_text, file_name="chat_history.txt", mime="text/plain")
-
-# --- File Paths ---
 CSV_FILE = 'cleaned_dataset.csv'
 TXT_FILE = 'institution_descriptions.txt'
 EMBEDDING_FILE = "embeddings.npy"
@@ -115,7 +79,36 @@ TEXTS_FILE = "texts.pkl"
 MODEL_NAME = 'all-MiniLM-L6-v2'
 OPENROUTER_MODEL = 'google/gemini-2.0-flash-exp:free'
 
-# --- Text Cleaning ---
+# --- Load Memory ---
+if os.path.exists(MEMORY_FILE):
+    with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+        st.session_state["messages"] = json.load(f)
+
+# --- Sidebar ---
+with st.sidebar:
+    st.markdown("## ⚙️ Settings")
+    st.session_state["dark_mode"] = st.toggle("🌙 Dark Mode", value=st.session_state["dark_mode"])
+    
+    st.markdown("---")
+    st.header("🕑 Chat History")
+    if st.session_state["messages"]:
+        for m in st.session_state["messages"]:
+            st.markdown(f"**{m['role'].capitalize()}**: {m['content'][:30]}...")
+    else:
+        st.markdown("*No chats yet.*")
+    
+    if st.button("🧹 Clear Chat"):
+        st.session_state["messages"] = []
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            json.dump([], f)
+        st.success("Chat history cleared!")
+        st.stop()
+
+    if st.button("📥 Download Chat"):
+        chat_text = "\n\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state["messages"]])
+        st.download_button("Download as TXT", data=chat_text, file_name="chat_history.txt", mime="text/plain")
+
+# --- Helper Functions ---
 def clean_field_name(field_name):
     return re.sub(' +', ' ', field_name.replace('_', ' ').replace('\n', ' ').strip().capitalize())
 
@@ -137,7 +130,6 @@ def generate_metadata_from_csv(csv_path, output_txt):
         for p in processed:
             f.write(p + '\n' + '-' * 40 + '\n')
 
-# --- Embedding Loader ---
 @st.cache_resource
 def load_data_and_embeddings():
     model = SentenceTransformer(MODEL_NAME)
@@ -160,13 +152,11 @@ def load_data_and_embeddings():
 
     return model, texts, index
 
-# --- Context Retrieval ---
 def retrieve_relevant_context(query, top_k):
     query_emb = model.encode([query])
     distances, indices = index.search(np.array(query_emb), top_k)
     return "\n\n".join([texts[i] for i in indices[0]])
 
-# --- API Call ---
 def ask_openrouter(context, question):
     prompt = f"""You are a helpful college assistant. Answer using the CONTEXT below. If unsure, say "I couldn't find that specific information."
 
@@ -206,42 +196,32 @@ def ask_openrouter(context, question):
             return ask_openrouter(context, question)
         return f"❌ Error: {e}"
 
-# --- Save Memory ---
-def save_memory():
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(st.session_state["messages"], f)
-
-# --- Init + UI ---
+# --- Run App ---
 generate_metadata_from_csv(CSV_FILE, TXT_FILE)
 model, texts, index = load_data_and_embeddings()
 TOP_K = min(5, len(texts))
 
-# --- Main UI ---
-st.title("🎓 College Info Assistant")
-st.markdown("##### Ask anything about colleges — accurate, fast, and friendly!")
+st.markdown("<h1 style='text-align: center;'>🎓 College Info Assistant</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color: gray;'>Ask anything about colleges — accurate, fast, and friendly!</p>", unsafe_allow_html=True)
 
+# --- Chat Display ---
 for msg in st.session_state["messages"]:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+    css_class = f"chat-message {msg['role']}"
+    st.markdown(f'<div class="{css_class}">{msg["content"]}</div>', unsafe_allow_html=True)
 
+# --- Input ---
 user_query = st.chat_input("Type your question here...")
 
 if user_query:
     st.session_state["messages"].append({"role": "user", "content": user_query})
-    with st.chat_message("user"):
-        st.markdown(user_query)
+    st.markdown(f'<div class="chat-message user">{user_query}</div>', unsafe_allow_html=True)
 
     with st.spinner("Thinking..."):
         context = retrieve_relevant_context(user_query, TOP_K)
         raw_answer = ask_openrouter(context, user_query)
 
-    final_answer = ""
-    with st.chat_message("assistant"):
-        placeholder = st.empty()
-        for i in range(len(raw_answer)):
-            final_answer = raw_answer[:i+1]
-            placeholder.markdown(final_answer)
-            time.sleep(0.01)
-
     st.session_state["messages"].append({"role": "assistant", "content": raw_answer})
-    save_memory()
+    st.markdown(f'<div class="chat-message assistant">{raw_answer}</div>', unsafe_allow_html=True)
+
+    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(st.session_state["messages"], f)
