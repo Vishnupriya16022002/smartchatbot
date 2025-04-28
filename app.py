@@ -11,12 +11,7 @@ import faiss
 from sentence_transformers import SentenceTransformer
 from multiprocessing import Pool, cpu_count
 
-API_KEYS = [
-    st.secrets["OPENROUTER_API_KEY_1"],
-    st.secrets["OPENROUTER_API_KEY_2"]
-]
-
-# Streamlit Config
+# --- Page Config ---
 st.set_page_config(
     page_title="🎓 College Info Assistant",
     page_icon="🤖",
@@ -24,7 +19,56 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# UI Settings
+# --- Custom CSS Styling ---
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap');
+
+    html, body, [class*="css"]  {
+        font-family: 'Inter', sans-serif;
+        background-color: #f0f2f6;
+        color: #1c1c1e;
+    }
+
+    .dark-mode body {
+        background-color: #1e1e1e !important;
+        color: #f5f5f5 !important;
+    }
+
+    .stChatMessage {
+        background-color: #ffffff;
+        border-radius: 12px;
+        padding: 12px 16px;
+        margin-bottom: 10px;
+        box-shadow: 0px 2px 6px rgba(0,0,0,0.05);
+    }
+
+    .stChatMessage.user {
+        background-color: #e8f0fe;
+    }
+
+    .stChatMessage.assistant {
+        background-color: #e6f4ea;
+    }
+
+    .css-18ni7ap.e8zbici2 {  /* sidebar header */
+        color: #0a84ff;
+    }
+
+    .css-1v3fvcr {
+        padding-top: 1rem;
+    }
+
+    </style>
+""", unsafe_allow_html=True)
+
+# --- Secrets ---
+API_KEYS = [
+    st.secrets["OPENROUTER_API_KEY_1"],
+    st.secrets["OPENROUTER_API_KEY_2"]
+]
+
+# --- UI States ---
 if "dark_mode" not in st.session_state:
     st.session_state["dark_mode"] = False
 if "api_key_index" not in st.session_state:
@@ -32,13 +76,37 @@ if "api_key_index" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
 
-# Load memory
+# --- Memory File ---
 MEMORY_FILE = "chat_memory.json"
 if os.path.exists(MEMORY_FILE):
     with open(MEMORY_FILE, "r", encoding="utf-8") as f:
         st.session_state["messages"] = json.load(f)
 
-# File paths
+# --- Sidebar ---
+with st.sidebar:
+    st.markdown("## ⚙️ Settings")
+    st.session_state["dark_mode"] = st.toggle("🌙 Dark Mode", value=st.session_state["dark_mode"])
+    if st.session_state["dark_mode"]:
+        st.markdown("<style>body { background-color: #1e1e1e; color: white; }</style>", unsafe_allow_html=True)
+
+    st.header("🕑 Chat History")
+    if st.session_state["messages"]:
+        for m in st.session_state["messages"]:
+            st.markdown(f"**{m['role'].capitalize()}**: {m['content'][:30]}...")
+    else:
+        st.markdown("*No chats yet.*")
+
+    if st.button("🧹 Clear Chat"):
+        st.session_state["messages"] = []
+        save_memory()
+        st.success("Chat history cleared!")
+        st.stop()
+
+    if st.button("📥 Download Chat"):
+        chat_text = "\n\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state["messages"]])
+        st.download_button("Download as TXT", data=chat_text, file_name="chat_history.txt", mime="text/plain")
+
+# --- File Paths ---
 CSV_FILE = 'cleaned_dataset.csv'
 TXT_FILE = 'institution_descriptions.txt'
 EMBEDDING_FILE = "embeddings.npy"
@@ -47,23 +115,7 @@ TEXTS_FILE = "texts.pkl"
 MODEL_NAME = 'all-MiniLM-L6-v2'
 OPENROUTER_MODEL = 'google/gemini-2.0-flash-exp:free'
 
-# Sidebar
-@st.cache_data
-def load_districts(csv_file):
-    with open(csv_file, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        districts = sorted(set(row["District"].strip() for row in reader if row.get("District")))
-    return districts
-
-districts = load_districts(CSV_FILE)
-
-with st.sidebar:
-    st.markdown("## ⚙️ Settings")
-    st.session_state["dark_mode"] = st.toggle("🌙 Dark Mode", value=st.session_state["dark_mode"])
-    st.markdown("## 🌎 Filter")
-    selected_district = st.selectbox("Select District (optional)", ["All"] + districts)
-
-# Text cleaning and conversion
+# --- Text Cleaning ---
 def clean_field_name(field_name):
     return re.sub(' +', ' ', field_name.replace('_', ' ').replace('\n', ' ').strip().capitalize())
 
@@ -74,20 +126,18 @@ def process_row(row):
             desc += f"{clean_field_name(k)}: {v.strip()}. "
     return desc.strip()
 
-def generate_metadata_from_csv(csv_path, output_txt, filter_district=None):
+def generate_metadata_from_csv(csv_path, output_txt):
     if os.path.exists(output_txt):
         return
     with open(csv_path, 'r', encoding='utf-8') as f:
         reader = list(csv.DictReader(f))
-    if filter_district and filter_district != "All":
-        reader = [row for row in reader if row.get("District", "").strip() == filter_district]
     with Pool(processes=cpu_count()) as pool:
         processed = pool.map(process_row, reader)
     with open(output_txt, 'w', encoding='utf-8') as f:
         for p in processed:
             f.write(p + '\n' + '-' * 40 + '\n')
 
-# Embedding loading + caching
+# --- Embedding Loader ---
 @st.cache_resource
 def load_data_and_embeddings():
     model = SentenceTransformer(MODEL_NAME)
@@ -110,13 +160,15 @@ def load_data_and_embeddings():
 
     return model, texts, index
 
+# --- Context Retrieval ---
 def retrieve_relevant_context(query, top_k):
     query_emb = model.encode([query])
     distances, indices = index.search(np.array(query_emb), top_k)
     return "\n\n".join([texts[i] for i in indices[0]])
 
+# --- API Call ---
 def ask_openrouter(context, question):
-    prompt = f"""You are a helpful college assistant. Answer using the CONTEXT below. If unsure, say \"I couldn't find that specific information.\"
+    prompt = f"""You are a helpful college assistant. Answer using the CONTEXT below. If unsure, say "I couldn't find that specific information."
 
     CONTEXT:
     {context}
@@ -154,44 +206,24 @@ def ask_openrouter(context, question):
             return ask_openrouter(context, question)
         return f"❌ Error: {e}"
 
-# Save memory
+# --- Save Memory ---
 def save_memory():
     with open(MEMORY_FILE, "w", encoding="utf-8") as f:
         json.dump(st.session_state["messages"], f)
 
-# --- Run app ---
-generate_metadata_from_csv(CSV_FILE, TXT_FILE, selected_district)
+# --- Init + UI ---
+generate_metadata_from_csv(CSV_FILE, TXT_FILE)
 model, texts, index = load_data_and_embeddings()
 TOP_K = min(5, len(texts))
 
+# --- Main UI ---
 st.title("🎓 College Info Assistant")
 st.markdown("##### Ask anything about colleges — accurate, fast, and friendly!")
 
-# Sidebar Chat History
-with st.sidebar:
-    st.header("🕒 Chat History")
-    if st.session_state["messages"]:
-        for m in st.session_state["messages"]:
-            st.markdown(f"**{m['role'].capitalize()}**: {m['content'][:30]}...")
-    else:
-        st.markdown("*No chats yet.*")
-
-    if st.button("🧹 Clear Chat"):
-        st.session_state["messages"] = []
-        save_memory()
-        st.success("Chat history cleared!")
-        st.stop()
-
-    if st.button("📅 Download Chat"):
-        chat_text = "\n\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state["messages"]])
-        st.download_button("Download as TXT", data=chat_text, file_name="chat_history.txt", mime="text/plain")
-
-# Chat Display
 for msg in st.session_state["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# User Input
 user_query = st.chat_input("Type your question here...")
 
 if user_query:
