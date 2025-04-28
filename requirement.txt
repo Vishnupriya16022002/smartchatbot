@@ -1,3 +1,6 @@
-streamlit
-python-dotenv
-requests
+streamlit>=1.25.0
+faiss-cpu>=1.7.4
+sentence-transformers>=2.2.2
+numpy>=1.23.0
+requests>=2.28.1
+python-dotenv>=1.0.0
