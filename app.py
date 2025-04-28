@@ -7,7 +7,7 @@ import pickle
 import requests
 import numpy as np
 import streamlit as st
-import faiss-cpu
+import faiss
 from sentence_transformers import SentenceTransformer
 from multiprocessing import Pool, cpu_count
 
