@@ -1,4 +1,4 @@
-faiss-cpu==1.7.4
+faiss-cpu
 streamlit
 sentence-transformers
 numpy
