@@ -3,5 +3,4 @@ streamlit
 sentence-transformers
 numpy
 requests
-python-dotenv
 pandas
