@@ -1,236 +1,204 @@
-import streamlit as st
 import os
-import requests
 import re
+import csv
+import json
 import time
-from difflib import get_close_matches
+import pickle
+import requests
+import numpy as np
+import streamlit as st
+import faiss
+from sentence_transformers import SentenceTransformer
+from multiprocessing import Pool, cpu_count
 
-st.set_page_config(page_title="🎓 Kerala College Chatbot", layout="wide")
+API_KEYS = [
+    st.secrets["OPENROUTER_API_KEY_1"],
+    st.secrets["OPENROUTER_API_KEY_2"]
+]
 
-# 🔐 Load Groq API keys securely from Streamlit Cloud secrets
-PRIMARY_GROQ_KEY = st.secrets.get("GROQ_API_KEY", "")
-BACKUP_KEYS = st.secrets.get("GROQ_BACKUP_API_KEYS", "").split(",")
-ALL_GROQ_KEYS = [PRIMARY_GROQ_KEY] + [k.strip() for k in BACKUP_KEYS if k.strip()]
+# Streamlit Config
+st.set_page_config(
+    page_title="🎓 College Info Assistant",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-STOPWORDS = {
-    "the", "in", "of", "with", "is", "a", "an", "colleges", "college", "for",
-    "show", "and", "which", "give", "list", "that", "on", "at", "to", "by", "as"
-}
+# UI Settings
+if "dark_mode" not in st.session_state:
+    st.session_state["dark_mode"] = False
+if "api_key_index" not in st.session_state:
+    st.session_state["api_key_index"] = 0
+if "messages" not in st.session_state:
+    st.session_state["messages"] = []
 
-def normalize_text(text):
-    text = text.lower()
-    abbreviations = {
-        "cas": "college of applied science",
-        "ce": "college of engineering",
-        "thss": "technical higher secondary school"
+# Load memory
+MEMORY_FILE = "chat_memory.json"
+if os.path.exists(MEMORY_FILE):
+    with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+        st.session_state["messages"] = json.load(f)
+
+# Sidebar
+with st.sidebar:
+    st.markdown("## ⚙️ Settings")
+    st.session_state["dark_mode"] = st.toggle("🌙 Dark Mode", value=st.session_state["dark_mode"])
+
+# File paths
+CSV_FILE = 'cleaned_dataset.csv'
+TXT_FILE = 'institution_descriptions.txt'
+EMBEDDING_FILE = "embeddings.npy"
+INDEX_FILE = "faiss.index"
+TEXTS_FILE = "texts.pkl"
+MODEL_NAME = 'all-MiniLM-L6-v2'
+OPENROUTER_MODEL = 'google/gemini-2.0-flash-exp:free'
+
+# Text cleaning and conversion
+def clean_field_name(field_name):
+    return re.sub(' +', ' ', field_name.replace('_', ' ').replace('\n', ' ').strip().capitalize())
+
+def process_row(row):
+    desc = row.get("Institution_Name", "Institution Name: Not Available").strip() + ". "
+    for k, v in row.items():
+        if k != "Institution_Name" and v and v.lower() not in ['n', 'no', 'not available']:
+            desc += f"{clean_field_name(k)}: {v.strip()}. "
+    return desc.strip()
+
+def generate_metadata_from_csv(csv_path, output_txt):
+    if os.path.exists(output_txt):
+        return
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = list(csv.DictReader(f))
+    with Pool(processes=cpu_count()) as pool:
+        processed = pool.map(process_row, reader)
+    with open(output_txt, 'w', encoding='utf-8') as f:
+        for p in processed:
+            f.write(p + '\n' + '-' * 40 + '\n')
+
+# Embedding loading + caching
+@st.cache_resource
+def load_data_and_embeddings():
+    model = SentenceTransformer(MODEL_NAME)
+
+    if os.path.exists(EMBEDDING_FILE) and os.path.exists(INDEX_FILE) and os.path.exists(TEXTS_FILE):
+        embeddings = np.load(EMBEDDING_FILE)
+        index = faiss.read_index(INDEX_FILE)
+        with open(TEXTS_FILE, "rb") as f:
+            texts = pickle.load(f)
+    else:
+        with open(TXT_FILE, 'r', encoding='utf-8') as f:
+            texts = [t.strip() for t in f.read().split('----------------------------------------') if t.strip()]
+        embeddings = model.encode(texts, show_progress_bar=True)
+        index = faiss.IndexFlatL2(embeddings.shape[1])
+        index.add(np.array(embeddings))
+        np.save(EMBEDDING_FILE, embeddings)
+        faiss.write_index(index, INDEX_FILE)
+        with open(TEXTS_FILE, "wb") as f:
+            pickle.dump(texts, f)
+
+    return model, texts, index
+
+def retrieve_relevant_context(query, top_k):
+    query_emb = model.encode([query])
+    distances, indices = index.search(np.array(query_emb), top_k)
+    return "\n\n".join([texts[i] for i in indices[0]])
+
+def ask_openrouter(context, question):
+    prompt = f"""You are a helpful college assistant. Answer using the CONTEXT below. If unsure, say "I couldn't find that specific information."
+
+    CONTEXT:
+    {context}
+
+    USER QUESTION:
+    {question}
+
+    Answer:"""
+
+    current_index = st.session_state["api_key_index"]
+    headers = {
+        "Authorization": f"Bearer {API_KEYS[current_index]}",
+        "Content-Type": "application/json",
     }
-    for abbr, full in abbreviations.items():
-        text = text.replace(abbr, full)
-    return text
-
-def extract_keywords(text):
-    text = normalize_text(text)
-    words = re.findall(r"\b\w+\b", text)
-    return set(w for w in words if w not in STOPWORDS)
-
-@st.cache_data
-def load_colleges():
-    with open("institution_descriptions.txt", "r", encoding="utf-8") as f:
-        raw = f.read()
-    blocks = raw.split("----------------------------------------")
-    colleges = []
-    for block in blocks:
-        if not block.strip():
-            continue
-        data = {
-            "name": "",
-            "location": "",
-            "courses": [],
-            "type": "",
-            "text": block.strip(),
-            "keywords": extract_keywords(block),
-            "category": "other"
-        }
-        name_match = re.search(r"^(.*?)\.\s*Located in (.*?).", block, re.IGNORECASE)
-        if name_match:
-            data["name"] = name_match.group(1).strip()
-            data["location"] = name_match.group(2).strip()
-        type_match = re.search(r"Belongs to the group of (.*?)\.", block)
-        if type_match:
-            data["type"] = type_match.group(1).strip()
-        course_matches = re.findall(r"Undergraduate Courses: (.*?)\.|Postgraduate Courses: (.*?)\.", block)
-        all_courses = []
-        for ug, pg in course_matches:
-            all_courses += [c.strip() for c in (ug + " " + pg).split(",") if c.strip()]
-        data["courses"] = all_courses
-
-        # Category tagging
-        text_lower = data["text"].lower()
-        name_lower = data["name"].lower()
-        if "engineering" in name_lower or any("btech" in c.lower() for c in data["courses"]) or "ktu" in text_lower:
-            data["keywords"].add("engineering")
-            data["category"] = "engineering"
-        elif "applied science" in name_lower:
-            data["keywords"].update(["applied", "science"])
-            data["category"] = "applied science"
-        elif "thss" in name_lower or "technical higher secondary" in name_lower:
-            data["keywords"].add("thss")
-            data["category"] = "thss"
-        colleges.append(data)
-    return colleges
-
-def match_colleges(user_query, colleges):
-    query_keywords = extract_keywords(user_query)
-    matches = []
-    for college in colleges:
-        score = len(query_keywords & college["keywords"])
-        if score > 0:
-            if "engineering" in query_keywords and college["category"] == "engineering":
-                score += 2
-            elif "applied" in query_keywords and "science" in query_keywords and college["category"] == "applied science":
-                score += 2
-        if score > 0:
-            matches.append((score, college))
-    matches.sort(reverse=True, key=lambda x: x[0])
-    return [m[1] for m in matches]
-
-def get_closest_blocks(query, colleges, n=3):
-    all_texts = [c["text"] for c in colleges]
-    close = get_close_matches(normalize_text(query), all_texts, n=n)
-    return [c for c in colleges if c["text"] in close]
-
-def chunk_college_data(matches, max_chars=3000):
-    chunks, current = [], ""
-    for c in matches:
-        entry = c["text"].strip() + "\n\n"
-        if len(current) + len(entry) < max_chars:
-            current += entry
-        else:
-            chunks.append(current)
-            current = entry
-    if current:
-        chunks.append(current)
-    return chunks[:5]
-
-def call_llama(query, context, max_retries=3):
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    system_prompt = (
-        "You are a strict assistant for answering college-related queries using ONLY the provided context. "
-        "Do NOT guess or invent. If the information is missing, clearly say it's not found."
-    )
-    user_prompt = f"User query: {query}\n\n🔒 STRICT CONTEXT:\n{context}\n\nAnswer based only on the info above."
 
     payload = {
-        "model": "llama3-70b-8192",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "temperature": 0.0
+        "model": OPENROUTER_MODEL,
+        "messages": [{"role": "user", "content": prompt}]
     }
 
-    for groq_key in ALL_GROQ_KEYS:
-        headers = {"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"}
-        for attempt in range(max_retries):
-            try:
-                if not st.session_state.get("shown_llama_wait_message", False):
-                    st.info("⏳ Just a moment while I fetch your result...")
-                    st.session_state["shown_llama_wait_message"] = True
+    try:
+        res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=60)
+        res.raise_for_status()
+        data = res.json()
+        if 'choices' in data:
+            return data['choices'][0]['message']['content']
+        elif "rate limit" in str(data).lower():
+            st.session_state["api_key_index"] = (current_index + 1) % len(API_KEYS)
+            return ask_openrouter(context, question)
+        else:
+            return f"❌ API Error: {data}"
+    except Exception as e:
+        if "rate limit" in str(e).lower():
+            st.session_state["api_key_index"] = (current_index + 1) % len(API_KEYS)
+            return ask_openrouter(context, question)
+        return f"❌ Error: {e}"
 
-                res = requests.post(url, headers=headers, json=payload)
-                data = res.json()
+# Save memory
+def save_memory():
+    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(st.session_state["messages"], f)
 
-                if 'choices' in data:
-                    return data['choices'][0]['message']['content']
-                elif 'error' in data and "Rate limit" in data['error'].get('message', ''):
-                    time.sleep(10 + attempt * 5)
-            except Exception:
-                time.sleep(5)
-    return "❌ All Groq keys failed due to rate limits or errors. Please try again later."
+# --- Run app ---
+generate_metadata_from_csv(CSV_FILE, TXT_FILE)
+model, texts, index = load_data_and_embeddings()
+TOP_K = min(5, len(texts))  # or increase based on needs
 
-def generate_answer_llama(query, matches):
-    st.session_state["shown_llama_wait_message"] = False
+st.title("🎓 College Info Assistant")
+st.markdown("##### Ask anything about colleges — accurate, fast, and friendly!")
 
-    if not matches:
-        return "❌ Sorry, I couldn't find any matching college in the dataset."
+# Sidebar Chat History
+with st.sidebar:
+    st.header("🕑 Chat History")
+    if st.session_state["messages"]:
+        for m in st.session_state["messages"]:
+            st.markdown(f"**{m['role'].capitalize()}**: {m['content'][:30]}...")
+    else:
+        st.markdown("*No chats yet.*")
 
-    q = query.lower()
-    category_filter = "engineering" if "engineering" in q else \
-                      "applied science" if "applied science" in q else \
-                      "thss" if "thss" in q or "technical higher secondary" in q else None
+    with st.sidebar:
+        if st.button("🧹 Clear Chat"):
+            st.session_state["messages"] = []
+            save_memory()
+            st.success("Chat history cleared!")
+            st.stop()  # use st.stop() instead of rerun to prevent errors
 
-    if category_filter:
-        filtered = [c for c in matches if c["category"] == category_filter]
-        if filtered:
-            matches = filtered
 
-    if len(matches) == 1:
-        return call_llama(query, matches[0]["text"])
+    if st.button("📥 Download Chat"):
+        chat_text = "\n\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state["messages"]])
+        st.download_button("Download as TXT", data=chat_text, file_name="chat_history.txt", mime="text/plain")
 
-    chunks = chunk_college_data(matches, max_chars=3000)
-    partials = [call_llama(query, chunk).strip() for chunk in chunks]
-    combined = "\n\n".join(partials)
+# Chat Display
+for msg in st.session_state["messages"]:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-    summary_prompt = (
-        f"You are summarizing verified college data only.\n\n"
-        f"Context:\n{combined}\n\n"
-        f"User query: {query}\n\n"
-        "✅ Summarize ONLY using the info above.\n"
-        "• Use one bullet per college like: [College Name], [District] - Offers [courses].\n"
-        "❌ Do NOT guess. ❌ Do NOT add anything not in context."
-    )
-    return call_llama(query, summary_prompt)
+# User Input
+user_query = st.chat_input("Type your question here...")
 
-# UI Setup
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+if user_query:
+    st.session_state["messages"].append({"role": "user", "content": user_query})
+    with st.chat_message("user"):
+        st.markdown(user_query)
 
-if "colleges" not in st.session_state:
-    st.session_state.colleges = load_colleges()
+    with st.spinner("Thinking..."):
+        context = retrieve_relevant_context(user_query, TOP_K)
+        raw_answer = ask_openrouter(context, user_query)
 
-st.markdown("<h1 style='text-align:center;'>🎓 Kerala College Info Chatbot</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align:center;'>Ask about colleges, courses, or principal info in Kerala.</p>", unsafe_allow_html=True)
+    final_answer = ""
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        for i in range(len(raw_answer)):
+            final_answer = raw_answer[:i+1]
+            placeholder.markdown(final_answer)
+            time.sleep(0.01)
 
-with st.form("chat_form", clear_on_submit=True):
-    user_input = st.text_input("💬 Ask your question:", placeholder="e.g., list engineering colleges")
-    submitted = st.form_submit_button("Send")
-
-if submitted and user_input:
-    matches = match_colleges(user_input, st.session_state.colleges)
-    if not matches:
-        matches = get_closest_blocks(user_input, st.session_state.colleges)
-    with st.spinner("🧠 Generating answer..."):
-        response = generate_answer_llama(user_input, matches)
-    st.session_state.chat_history.append(("user", user_input))
-    st.session_state.chat_history.append(("bot", response))
-
-# Chat UI
-st.markdown("### 💬 Conversation")
-for sender, msg in st.session_state.chat_history:
-    color = "#64b5f6" if sender == "user" else "#2196f3"
-    role = "🧑 You" if sender == "user" else "🤖 Bot"
-    st.markdown(
-        f"""<div style='margin-bottom:12px;padding:12px;
-                    background-color: rgba(33, 150, 243, 0.1);
-                    border-left: 4px solid {color};
-                    border-radius: 8px;
-                    font-size: 16px;'>
-            <strong>{role}:</strong><br>{msg}</div>""",
-        unsafe_allow_html=True
-    )
-
-# Chat actions
-col1, col2 = st.columns(2)
-with col1:
-    if st.button("🧹 Clear Chat"):
-        st.session_state.chat_history = []
-
-with col2:
-    if st.download_button("💾 Download Chat",
-        data="\n\n".join(
-            f"You: {q[1]}\nBot: {a[1]}" for q, a in zip(
-                st.session_state.chat_history[::2], st.session_state.chat_history[1::2]
-            )
-        ),
-        file_name="chat_history.txt", mime="text/plain"):
-        st.success("✅ Chat downloaded!")
+    st.session_state["messages"].append({"role": "assistant", "content": raw_answer})
+    save_memory()
