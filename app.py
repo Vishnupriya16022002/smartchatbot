@@ -38,11 +38,6 @@ if os.path.exists(MEMORY_FILE):
     with open(MEMORY_FILE, "r", encoding="utf-8") as f:
         st.session_state["messages"] = json.load(f)
 
-# Sidebar
-with st.sidebar:
-    st.markdown("## ⚙️ Settings")
-    st.session_state["dark_mode"] = st.toggle("🌙 Dark Mode", value=st.session_state["dark_mode"])
-
 # File paths
 CSV_FILE = 'cleaned_dataset.csv'
 TXT_FILE = 'institution_descriptions.txt'
@@ -51,6 +46,22 @@ INDEX_FILE = "faiss.index"
 TEXTS_FILE = "texts.pkl"
 MODEL_NAME = 'all-MiniLM-L6-v2'
 OPENROUTER_MODEL = 'google/gemini-2.0-flash-exp:free'
+
+# Sidebar
+@st.cache_data
+def load_districts(csv_file):
+    with open(csv_file, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        districts = sorted(set(row["District"].strip() for row in reader if row.get("District")))
+    return districts
+
+districts = load_districts(CSV_FILE)
+
+with st.sidebar:
+    st.markdown("## ⚙️ Settings")
+    st.session_state["dark_mode"] = st.toggle("🌙 Dark Mode", value=st.session_state["dark_mode"])
+    st.markdown("## 🌎 Filter")
+    selected_district = st.selectbox("Select District (optional)", ["All"] + districts)
 
 # Text cleaning and conversion
 def clean_field_name(field_name):
@@ -63,11 +74,13 @@ def process_row(row):
             desc += f"{clean_field_name(k)}: {v.strip()}. "
     return desc.strip()
 
-def generate_metadata_from_csv(csv_path, output_txt):
+def generate_metadata_from_csv(csv_path, output_txt, filter_district=None):
     if os.path.exists(output_txt):
         return
     with open(csv_path, 'r', encoding='utf-8') as f:
         reader = list(csv.DictReader(f))
+    if filter_district and filter_district != "All":
+        reader = [row for row in reader if row.get("District", "").strip() == filter_district]
     with Pool(processes=cpu_count()) as pool:
         processed = pool.map(process_row, reader)
     with open(output_txt, 'w', encoding='utf-8') as f:
@@ -103,7 +116,7 @@ def retrieve_relevant_context(query, top_k):
     return "\n\n".join([texts[i] for i in indices[0]])
 
 def ask_openrouter(context, question):
-    prompt = f"""You are a helpful college assistant. Answer using the CONTEXT below. If unsure, say "I couldn't find that specific information."
+    prompt = f"""You are a helpful college assistant. Answer using the CONTEXT below. If unsure, say \"I couldn't find that specific information.\"
 
     CONTEXT:
     {context}
@@ -147,31 +160,29 @@ def save_memory():
         json.dump(st.session_state["messages"], f)
 
 # --- Run app ---
-generate_metadata_from_csv(CSV_FILE, TXT_FILE)
+generate_metadata_from_csv(CSV_FILE, TXT_FILE, selected_district)
 model, texts, index = load_data_and_embeddings()
-TOP_K = min(5, len(texts))  # or increase based on needs
+TOP_K = min(5, len(texts))
 
 st.title("🎓 College Info Assistant")
 st.markdown("##### Ask anything about colleges — accurate, fast, and friendly!")
 
 # Sidebar Chat History
 with st.sidebar:
-    st.header("🕑 Chat History")
+    st.header("🕒 Chat History")
     if st.session_state["messages"]:
         for m in st.session_state["messages"]:
             st.markdown(f"**{m['role'].capitalize()}**: {m['content'][:30]}...")
     else:
         st.markdown("*No chats yet.*")
 
-    with st.sidebar:
-        if st.button("🧹 Clear Chat"):
-            st.session_state["messages"] = []
-            save_memory()
-            st.success("Chat history cleared!")
-            st.stop()  # use st.stop() instead of rerun to prevent errors
+    if st.button("🧹 Clear Chat"):
+        st.session_state["messages"] = []
+        save_memory()
+        st.success("Chat history cleared!")
+        st.stop()
 
-
-    if st.button("📥 Download Chat"):
+    if st.button("📅 Download Chat"):
         chat_text = "\n\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state["messages"]])
         st.download_button("Download as TXT", data=chat_text, file_name="chat_history.txt", mime="text/plain")
 
