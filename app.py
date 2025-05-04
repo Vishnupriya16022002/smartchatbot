@@ -1,4 +1,20 @@
-# --- Core Imports ---
+import torch
+
+st.title("PyTorch Test App")
+st.write(f"PyTorch version: {torch.__version__ if hasattr(torch, '__version__') else 'Not available'}")
+st.write("Attempting to import PyTorch...")
+
+try:
+    _ = torch.Tensor([1, 2, 3])
+    st.write("PyTorch imported and a basic tensor created successfully!")
+except ImportError as e:
+    st.error(f"Error importing PyTorch: {e}")
+except RuntimeError as e:
+    st.error(f"RuntimeError with PyTorch: {e}")
+except Exception as e:
+    st.error(f"An unexpected error occurred: {e}")
+
+st.write("End of test.")# --- Core Imports ---
 import csv
 import re
 import multiprocessing
@@ -14,6 +30,7 @@ import json
 import google.generativeai as genai
 
 # --- MUST BE FIRST: Streamlit page config ---
+
 st.set_page_config(
     page_title="🎓 Placement Info Assistant",
     page_icon="🤖",
