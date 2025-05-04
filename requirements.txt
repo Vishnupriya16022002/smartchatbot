@@ -6,3 +6,4 @@ google-generativeai
 torch
 torchaudio
 torchvision
+huggingface_hub==0.10.0
