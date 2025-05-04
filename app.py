@@ -1,24 +1,8 @@
-import torch
-
-st.title("PyTorch Test App")
-st.write(f"PyTorch version: {torch.__version__ if hasattr(torch, '__version__') else 'Not available'}")
-st.write("Attempting to import PyTorch...")
-
-try:
-    _ = torch.Tensor([1, 2, 3])
-    st.write("PyTorch imported and a basic tensor created successfully!")
-except ImportError as e:
-    st.error(f"Error importing PyTorch: {e}")
-except RuntimeError as e:
-    st.error(f"RuntimeError with PyTorch: {e}")
-except Exception as e:
-    st.error(f"An unexpected error occurred: {e}")
-
-st.write("End of test.")# --- Core Imports ---
+# --- Core Imports ---
 import csv
 import re
 import multiprocessing
-# from multiprocessing import Pool # Commenting out for now
+from multiprocessing import Pool, freeze_support
 import streamlit as st
 import faiss
 from sentence_transformers import SentenceTransformer
@@ -29,140 +13,45 @@ import time
 import json
 import google.generativeai as genai
 
-# --- MUST BE FIRST: Streamlit page config ---
-
-st.set_page_config(
-    page_title="🎓 Placement Info Assistant",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
-# Inject responsive viewport meta tag
-st.markdown("""
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-""", unsafe_allow_html=True)
-
-# --- Configuration ---
-CSV_FILE = 'placement.csv'  # <--- Use your placement CSV file
-TXT_FILE = 'institution_descriptions_placement.txt' # Use a distinct name
-MEMORY_FILE = "chat_memory_placement.json" # Use a distinct name
-EMBEDDING_MODEL_NAME = 'all-MiniLM-L6-v2' # Well-known Sentence Transformer model
-TOP_K = 5 # Number of relevant context snippets to retrieve
-
-# --- Gemini Model Setup ---
-# Ensure API key is in st.secrets["api_key"]
-try:
-    genai.configure(api_key=st.secrets["api_key"])
-    # Use gemini-1.5-flash as requested previously, or check availability
-    llm_model = genai.GenerativeModel('gemini-1.5-flash')
-    gemini_configured = True
-except Exception as e:
-    st.error(f"💥 Failed to configure Google AI: {e}")
-    st.error("Please ensure your Google API Key is correctly set in Streamlit secrets as 'api_key'. The app requires Gemini to function.")
-    gemini_configured = False
-    llm_model = None # Set model to None if configuration fails
-
-# --- Centered Title and Subtitle ---
-st.markdown("""
-    <style>
-    .centered-title {
-        text-align: center;
-        font-size: 2.5em;
-        font-weight: bold;
-        margin-bottom: 0.2em;
-    }
-    .centered-subtitle {
-        text-align: center;
-        font-size: 1.2em;
-        color: #AAA; /* Lighter for dark theme */
-        margin-bottom: 1em;
-    }
-    .chat-bubble {
-        display: inline-block;
-        padding: 10px 15px;
-        border-radius: 18px;
-        margin: 5px;
-        max-width: 85%;
-        word-wrap: break-word;
-    }
-    /* Customize based on Streamlit's theme */
-    [data-testid="stChatMessage"] > div[data-testid="stMarkdownContainer"] {
-        /* Assistant bubble */
-        background-color: #262730; /* Slightly different background */
-        border: 1px solid #333;
-        border-radius: 18px;
-        padding: 10px 15px;
-        float: left;
-    }
-    [data-testid="stChatMessage"].user-message > div[data-testid="stMarkdownContainer"] {
-        /* User bubble */
-        background-color: #0b8e44; /* Use the green from previous attempts */
-        color: white;
-        border-radius: 18px;
-        padding: 10px 15px;
-        float: right;
-    }
-    </style>
-
-    <div class="centered-title">🎓 Placement Info Assistant</div>
-    <div class="centered-subtitle">
-        Ask questions about IHRD college placements (Powered by Gemini & Semantic Search)
-        <br><span style="font-size: 0.8em; color: #888;">Enter queries like "Placement percentage at MEC" or "Companies visiting CAS Mavelikara"</span>
-    </div>
-    <hr style="border-color: #444;">
-""", unsafe_allow_html=True)
-
-
-# --- Utility Functions ---
+# --- Utility Functions (Must be at the top level) ---
 def clean_field_name(field_name):
     """Cleans CSV header names for display."""
     if not isinstance(field_name, str):
         return "Unknown Field"
-    # Replace underscores/newlines with spaces, strip, capitalize words
     field_name = field_name.replace('_', ' ').replace('\n', ' ').strip()
-    field_name = re.sub(' +', ' ', field_name) # Collapse multiple spaces
-    # Capitalize the first letter of each word
+    field_name = re.sub(' +', ' ', field_name)
     field_name = ' '.join(word.capitalize() for word in field_name.split())
-    # Specific replacements if needed (e.g., Po -> Placement Officer)
     field_name = field_name.replace("Po ", "Placement Officer ")
     field_name = field_name.replace("Ug", "UG")
     field_name = field_name.replace("Pg", "PG")
-    field_name = field_name.replace("Perc ", "% ") # Adjust based on actual names
+    field_name = field_name.replace("Perc ", "% ")
     return field_name
 
 def process_row(row):
     """Processes a CSV row into a descriptive text paragraph."""
     description = ""
-    # --- IMPORTANT: Adjust 'Institution Name' to your actual CSV column header ---
-    institution_name_col = 'Institution Name' # Default assumption
+    institution_name_col = 'Institution Name'
     institution_name = row.get(institution_name_col, '').strip()
 
     if institution_name:
         description += f"Institution: {institution_name}."
     else:
-        # Skip rows without an institution name or handle as needed
-        return None # Return None to indicate this row should be skipped
+        return None
 
     for field_name, field_value in row.items():
-        # Skip the institution name field itself as we added it first
         if field_name == institution_name_col:
             continue
-
-        # Basic cleaning and checking of the value
         if field_value is None: continue
         field_value_str = str(field_value).strip()
         if not field_value_str or field_value_str.lower() in ['n', 'no', 'nil', 'na', 'n/a', 'nan']:
-            continue # Skip empty or clearly marked unavailable fields
-
-        # Clean the field name for readability
+            continue
         clean_name = clean_field_name(field_name)
         description += f" {clean_name}: {field_value_str}."
 
     return description.strip()
 
-def generate_metadata_from_csv(csv_filepath, output_txt_path):
-    """Reads CSV, processes rows sequentially, writes descriptions to TXT file if it doesn't exist."""
+def _generate_metadata_worker(csv_filepath, output_txt_path, num_workers):
+    """Worker function to generate metadata."""
     if os.path.exists(output_txt_path):
         print(f"'{output_txt_path}' already exists. Skipping generation.")
         st.toast(f"Using existing data index.", icon="ℹ️")
@@ -172,7 +61,7 @@ def generate_metadata_from_csv(csv_filepath, output_txt_path):
     st.toast(f"Processing {csv_filepath} for search index...", icon="⏳")
     start_time = time.time()
     try:
-        with open(csv_filepath, 'r', encoding='latin-1') as csvfile: # Try 'latin-1' encoding
+        with open(csv_filepath, 'r', encoding='latin-1') as csvfile:
             content = csvfile.read()
             if content.startswith('\ufeff'):
                 content = content[1:]
@@ -182,28 +71,20 @@ def generate_metadata_from_csv(csv_filepath, output_txt_path):
             st.error(f"CSV file '{csv_filepath}' appears to be empty or couldn't be read properly.")
             return
 
-        print(f"Number of rows read from CSV: {len(reader)}") # DEBUGGING
+        with Pool(processes=num_workers or multiprocessing.cpu_count()) as pool:
+            results = pool.map(process_row, reader)
 
-        paragraphs = []
-        for row in reader:
-            print(f"Processing row: {row}") # DEBUGGING
-            result = process_row(row)
-            print(f"Result of processing: {result}") # DEBUGGING
-            if result is not None:
-                paragraphs.append(result)
-
-        print(f"Number of valid paragraphs generated: {len(paragraphs)}") # DEBUGGING
+        paragraphs = [p for p in results if p is not None]
 
         if not paragraphs:
             st.error(f"No valid descriptions could be generated from '{csv_filepath}'. Check the file content and 'Institution Name' column.")
             return
 
-        # Write the generated paragraphs to the output text file
         with open(output_txt_path, 'w', encoding='utf-8') as outfile:
             for i, paragraph in enumerate(paragraphs):
                 outfile.write(paragraph + '\n')
-                if i < len(paragraphs) - 1: # Add separator between paragraphs
-                    outfile.write('-' * 40 + '\n') # Separator line
+                if i < len(paragraphs) - 1:
+                    outfile.write('-' * 40 + '\n')
 
         end_time = time.time()
         print(f"Finished generating descriptions to '{output_txt_path}' in {end_time - start_time:.2f} seconds.")
@@ -211,7 +92,7 @@ def generate_metadata_from_csv(csv_filepath, output_txt_path):
 
     except UnicodeDecodeError:
         try:
-            with open(csv_filepath, 'r', encoding='cp1252') as csvfile: # Try another common encoding
+            with open(csv_filepath, 'r', encoding='cp1252') as csvfile:
                 content = csvfile.read()
                 if content.startswith('\ufeff'):
                     content = content[1:]
@@ -221,28 +102,20 @@ def generate_metadata_from_csv(csv_filepath, output_txt_path):
                 st.error(f"CSV file '{csv_filepath}' appears to be empty or couldn't be read properly (second attempt).")
                 return
 
-            print(f"Number of rows read from CSV (attempt 2): {len(reader)}") # DEBUGGING
+            with Pool(processes=num_workers or multiprocessing.cpu_count()) as pool:
+                results = pool.map(process_row, reader)
 
-            paragraphs = []
-            for row in reader:
-                print(f"Processing row (attempt 2): {row}") # DEBUGGING
-                result = process_row(row)
-                print(f"Result of processing (attempt 2): {result}") # DEBUGGING
-                if result is not None:
-                    paragraphs.append(result)
-
-            print(f"Number of valid paragraphs generated (attempt 2): {len(paragraphs)}") # DEBUGGING
+            paragraphs = [p for p in results if p is not None]
 
             if not paragraphs:
                 st.error(f"No valid descriptions could be generated from '{csv_filepath}' (second attempt). Check the file content and 'Institution Name' column.")
                 return
 
-            # Write the generated paragraphs to the output text file
             with open(output_txt_path, 'w', encoding='utf-8') as outfile:
                 for i, paragraph in enumerate(paragraphs):
                     outfile.write(paragraph + '\n')
-                    if i < len(paragraphs) - 1: # Add separator between paragraphs
-                        outfile.write('-' * 40 + '\n') # Separator line
+                    if i < len(paragraphs) - 1:
+                        outfile.write('-' * 40 + '\n')
 
             end_time = time.time()
             print(f"Finished generating descriptions to '{output_txt_path}' (second attempt) in {end_time - start_time:.2f} seconds.")
@@ -258,71 +131,137 @@ def generate_metadata_from_csv(csv_filepath, output_txt_path):
         st.error(f"❌ Error processing CSV file '{csv_filepath}': {e}")
         print(f"Error during CSV processing: {e}")
 
-@st.cache_resource(show_spinner="Loading knowledge base...")
-def load_data_and_embeddings():
-    """Loads text descriptions, generates embeddings, and builds FAISS index."""
-    if not os.path.exists(TXT_FILE):
-        st.error(f"Description file '{TXT_FILE}' not found. Please ensure it was generated correctly from the CSV.")
-        return None, None, None
+# --- Main Streamlit App ---
+if __name__ == '__main__':
+    freeze_support()
 
+    # --- MUST BE FIRST: Streamlit page config ---
+    st.set_page_config(
+        page_title="🎓 Placement Info Assistant",
+        page_icon="🤖",
+        layout="wide",
+        initial_sidebar_state="collapsed"
+    )
+
+    # Inject responsive viewport meta tag
+    st.markdown("""
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    """, unsafe_allow_html=True)
+
+    # --- Configuration ---
+    CSV_FILE = 'placement.csv'
+    TXT_FILE = 'institution_descriptions_placement.txt'
+    MEMORY_FILE = "chat_memory_placement.json"
+    EMBEDDING_MODEL_NAME = 'all-MiniLM-L6-v2'
+    TOP_K = 5
+
+    # --- Gemini Model Setup ---
     try:
-        with open(TXT_FILE, 'r', encoding='utf-8') as file:
-            # Read the file and split by the separator line
-            content = file.read()
-            texts = content.split('-' * 40) # Split by the separator
+        genai.configure(api_key=st.secrets["api_key"])
+        llm_model = genai.GenerativeModel('gemini-1.5-flash')
+        gemini_configured = True
+    except Exception as e:
+        st.error(f"💥 Failed to configure Google AI: {e}")
+        st.error("Please ensure your Google API Key is correctly set in Streamlit secrets as 'api_key'. The app requires Gemini to function.")
+        gemini_configured = False
+        llm_model = None
 
-        # Clean up whitespace and remove empty strings
-        texts = [text.strip().replace('\n', ' ') for text in texts if text.strip()]
+    # --- Centered Title and Subtitle ---
+    st.markdown("""
+        <style>
+        .centered-title {
+            text-align: center;
+            font-size: 2.5em;
+            font-weight: bold;
+            margin-bottom: 0.2em;
+        }
+        .centered-subtitle {
+            text-align: center;
+            font-size: 1.2em;
+            color: #AAA;
+            margin-bottom: 1em;
+        }
+        .chat-bubble {
+            display: inline-block;
+            padding: 10px 15px;
+            border-radius: 18px;
+            margin: 5px;
+            max-width: 85%;
+            word-wrap: break-word;
+        }
+        [data-testid="stChatMessage"] > div[data-testid="stMarkdownContainer"] {
+            background-color: #262730;
+            border: 1px solid #333;
+            border-radius: 18px;
+            padding: 10px 15px;
+            float: left;
+        }
+        [data-testid="stChatMessage"].user-message > div[data-testid="stMarkdownContainer"] {
+            background-color: #0b8e44;
+            color: white;
+            border-radius: 18px;
+            padding: 10px 15px;
+            float: right;
+        }
+        </style>
 
-        if not texts:
-            st.error(f"No text descriptions found in '{TXT_FILE}'. Check the generation process.")
+        <div class="centered-title">🎓 Placement Info Assistant</div>
+        <div class="centered-subtitle">
+            Ask questions about IHRD college placements (Powered by Gemini & Semantic Search)
+            <br><span style="font-size: 0.8em; color: #888;">Enter queries like "Placement percentage at MEC" or "Companies visiting CAS Mavelikara"</span>
+        </div>
+        <hr style="border-color: #444;">
+    """, unsafe_allow_html=True)
+
+    # --- Generate metadata ---
+    _generate_metadata_worker(CSV_FILE, TXT_FILE, None)
+
+    # --- Load data and embeddings ---
+    @st.cache_resource(show_spinner="Loading knowledge base...")
+    def load_data():
+        if not os.path.exists(TXT_FILE):
+            st.error(f"Description file '{TXT_FILE}' not found. Please ensure it was generated correctly from the CSV.")
             return None, None, None
 
-        print(f"Loading embedding model '{EMBEDDING_MODEL_NAME}'...")
-        embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        try:
+            with open(TXT_FILE, 'r', encoding='utf-8') as file:
+                content = file.read()
+                texts = content.split('-' * 40)
+            texts = [text.strip().replace('\n', ' ') for text in texts if text.strip()]
+            if not texts:
+                st.error(f"No text descriptions found in '{TXT_FILE}'. Check the generation process.")
+                return None, None, None
 
-        print(f"Generating embeddings for {len(texts)} text snippets...")
-        embeddings = embedding_model.encode(texts, show_progress_bar=False) # Set show_progress_bar=True for long lists
+            embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+            embeddings = embedding_model.encode(texts, show_progress_bar=False)
+            index = faiss.IndexFlatL2(embeddings.shape[1])
+            index.add(np.array(embeddings).astype('float32'))
+            print("Knowledge base loaded successfully.")
+            return embedding_model, texts, index
+        except Exception as e:
+            st.error(f"❌ Failed to load or build the knowledge base: {e}")
+            print(f"Error during embedding/indexing: {e}")
+            return None, None, None
 
-        print("Building FAISS index...")
-        index = faiss.IndexFlatL2(embeddings.shape[1]) # Using L2 distance
-        index.add(np.array(embeddings).astype('float32')) # FAISS expects float32
+    embedding_model, texts, index = load_data()
 
-        print("Knowledge base loaded successfully.")
-        return embedding_model, texts, index
+    def retrieve_relevant_context(query, emb_model, idx, txts, top_k_val):
+        if idx is None or emb_model is None:
+            return "Error: Knowledge base not loaded."
+        try:
+            query_emb = emb_model.encode([query])
+            distances, indices = idx.search(np.array(query_emb).astype('float32'), top_k_val)
+            valid_indices = [i for i in indices[0] if i != -1 and i < len(txts)]
+            context = "\n\n".join([txts[i] for i in valid_indices])
+            return context
+        except Exception as e:
+            print(f"Error during context retrieval: {e}")
+            return f"Error retrieving context: {e}"
 
-    except Exception as e:
-        st.error(f"❌ Failed to load or build the knowledge base: {e}")
-        print(f"Error during embedding/indexing: {e}")
-        return None, None, None
-
-
-def retrieve_relevant_context(query, embedding_model, index, texts, top_k):
-    """Encodes query and retrieves top_k relevant texts from FAISS index."""
-    if index is None or embedding_model is None:
-        return "Error: Knowledge base not loaded."
-    try:
-        query_emb = embedding_model.encode([query])
-        distances, indices = index.search(np.array(query_emb).astype('float32'), top_k)
-
-        # Filter out potential -1 indices if top_k > number of items
-        valid_indices = [i for i in indices[0] if i != -1 and i < len(texts)]
-
-        # Retrieve the actual text context
-        context = "\n\n".join([texts[i] for i in valid_indices])
-        return context
-    except Exception as e:
-        print(f"Error during context retrieval: {e}")
-        return f"Error retrieving context: {e}"
-
-
-def ask_gemini_with_context(context, question):
-    """Sends context and question to the configured Gemini model."""
-    if not gemini_configured or llm_model is None:
-        return "❌ Error: Gemini AI model is not configured or available."
-
-    # Improved Prompt Structure
-    prompt = f"""
+    def ask_gemini_with_context(context, question):
+        if not gemini_configured or llm_model is None:
+            return "❌ Error: Gemini AI model is not configured or available."
+        prompt = f"""
 You are an expert AI assistant specializing in providing information about IHRD college placements based *only* on the provided context.
 
 **Instructions:**
@@ -344,42 +283,73 @@ You are an expert AI assistant specializing in providing information about IHRD 
 
 **Answer:**
 """
-    try:
-        # Use the configured llm_model
-        response = llm_model.generate_content(prompt)
-
-        # Basic safety check (though Gemini API handles most of this)
-        if response.parts:
-            return response.text
-        elif response.prompt_feedback.block_reason:
-            return f"⚠️ Response blocked due to: {response.prompt_feedback.block_reason.name}. Try rephrasing your question."
-        else:
-            return "❓ Sorry, I couldn't generate a response for that query based on the available information."
-
-    except Exception as e:
-        print(f"❌ Gemini API error: {e}")
-        # You might want to check for specific error types like google.api_core.exceptions.ResourceExhausted
-        return f"❌ An error occurred while contacting the AI model: {e}"
-
-
-# --- Memory Persistence ---
-def save_memory():
-    """Saves chat history to a JSON file."""
-    try:
-        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(st.session_state["messages"], f, indent=2) # Add indent for readability
-    except Exception as e:
-        print(f"Error saving memory: {e}")
-
-def load_memory():
-    """Loads chat history from a JSON file if it exists."""
-    if os.path.exists(MEMORY_FILE):
         try:
-            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-                st.session_state["messages"] = json.load(f)
-        except json.JSONDecodeError:
-            print(f"Error decoding JSON from {MEMORY_FILE}. Starting fresh.")
-            st.session_state["messages"] = []
+            response = llm_model.generate_content(prompt)
+            if response.parts:
+                return response.text
+            elif response.prompt_feedback.block_reason:
+                return f"⚠️ Response blocked due to: {response.prompt_feedback.block_reason.name}. Try rephrasing your question."
+            else:
+                return "❓ Sorry, I couldn't generate a response for that query based on the available information."
         except Exception as e:
-            print(f"Error loading memory: {e}")
+            print(f"❌ Gemini API error: {e}")
+            return f"❌ An error occurred while contacting the AI model: {e}"
+
+    # --- Memory Persistence ---
+    def save_memory():
+        try:
+            with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(st.session_state["messages"], f, indent=2)
+        except Exception as e:
+            print(f"Error saving memory: {e}")
+
+    def load_memory():
+        if os.path.exists(MEMORY_FILE):
+            try:
+                with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+                    st.session_state["messages"] = json.load(f)
+            except json.JSONDecodeError:
+                print(f"Error decoding JSON from {MEMORY_FILE}. Starting fresh.")
+                st.session_state["messages"] = []
+            except Exception as e:
+                print(f"Error loading memory: {e}")
+                st.session_state["messages"] = []
+        else:
             st.session_state["messages"] = []
+
+    # --- Chat Interface ---
+    if "messages" not in st.session_state:
+        load_memory()
+
+    if not st.session_state["messages"]:
+        welcome_message = "👋 Hello! Ask me about IHRD college placements. For example: 'What companies visit MEC?' or 'Placement percentage for CAS Mavelikara?'"
+        st.session_state["messages"].append({"role": "assistant", "content": welcome_message})
+
+    with st.sidebar:
+        st.header("🕑 Chat History")
+        if st.session_state["messages"]:
+            for i, msg in enumerate(reversed(st.session_state["messages"])):
+                st.markdown(f"**{msg['role'].capitalize()}**: {msg['content'][:50]}{'...' if len(msg['content']) > 50 else ''}")
+                if i < len(st.session_state["messages"]) - 1:
+                    st.markdown("---")
+        else:
+            st.markdown("*No chats yet.*")
+
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🧹 Clear Chat", use_container_width=True):
+                st.session_state["messages"] = []
+                if os.path.exists(MEMORY_FILE):
+                    try:
+                        os.remove(MEMORY_FILE)
+                    except OSError as e:
+                        print(f"Error removing memory file: {e}")
+                st.rerun()
+        with col2:
+            if st.session_state["messages"]:
+                chat_text = "\n\n".join([f"[{m['role'].upper()}]\n{m['content']}" for m in st.session_state["messages"]])
+                st.download_button(
+                    label="📥 Download",
+                    data=chat_text,
+                    file_name="placement_chat_
