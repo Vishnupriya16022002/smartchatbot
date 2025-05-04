@@ -3,8 +3,6 @@ sentence-transformers==2.2.2
 faiss-cpu
 numpy
 google-generativeai
-torch  # Included in case it's needed by sentence-transformers in the cloud
-torchaudio # Included in case it's needed by torch
-torchvision # Included in case it's needed by torch
-huggingface_hub==0.10.0 # Pinned version based on earlier discussion
-transformers==4.21.0 # Pinned version based on earlier discussion
+torch
+huggingface_hub==0.10.0
+transformers==4.21.0
