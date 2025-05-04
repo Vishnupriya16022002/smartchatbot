@@ -367,10 +367,3 @@ def load_memory():
             print(f"Error loading memory: {e}")
             st.session_state["messages"] = []
     else:
-        st.session_state["messages"] = []
-
-
-# --- Main App Logic ---
-
-# 1. Generate descriptions from CSV if TXT doesn't exist
-generate_metadata_from_csv(CSV_FILE,
