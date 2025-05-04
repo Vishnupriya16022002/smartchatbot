@@ -3,3 +3,6 @@ sentence-transformers
 faiss-cpu
 numpy
 google-generativeai
+torch
+torchaudio
+torchvision
