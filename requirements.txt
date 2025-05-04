@@ -6,4 +6,5 @@ google-generativeai
 torch
 torchaudio
 torchvision
-huggingface_hub==0.10.0
+huggingface_hub==0.10.0  # Or try a slightly newer one like 0.15.0
+transformers==4.21.0
