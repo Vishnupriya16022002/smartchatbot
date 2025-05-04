@@ -366,4 +366,3 @@ def load_memory():
         except Exception as e:
             print(f"Error loading memory: {e}")
             st.session_state["messages"] = []
-    else:
