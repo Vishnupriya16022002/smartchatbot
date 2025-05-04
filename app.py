@@ -17,9 +17,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-st.markdown("""
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-""", unsafe_allow_html=True)
+st.markdown("""<meta name="viewport" content="width=device-width, initial-scale=1.0">""", unsafe_allow_html=True)
 
 CSV_FILE = 'placement.csv'
 TXT_FILE = 'institution_descriptions_placement.txt'
@@ -27,16 +25,17 @@ MEMORY_FILE = "chat_memory_placement.json"
 EMBEDDING_MODEL_NAME = 'all-MiniLM-L6-v2'
 TOP_K = 5
 
+# Setup Gemini
 try:
     genai.configure(api_key=st.secrets["api_key"])
     llm_model = genai.GenerativeModel('gemini-1.5-flash')
     gemini_configured = True
 except Exception as e:
     st.error(f"💥 Failed to configure Google AI: {e}")
-    st.error("Please ensure your Google API Key is correctly set in Streamlit secrets as 'api_key'. The app requires Gemini to function.")
     gemini_configured = False
     llm_model = None
 
+# Styling & Header
 st.markdown("""
     <style>
     .centered-title {
@@ -50,14 +49,6 @@ st.markdown("""
         font-size: 1.2em;
         color: #AAA;
         margin-bottom: 1em;
-    }
-    .chat-bubble {
-        display: inline-block;
-        padding: 10px 15px;
-        border-radius: 18px;
-        margin: 5px;
-        max-width: 85%;
-        word-wrap: break-word;
     }
     [data-testid="stChatMessage"] > div[data-testid="stMarkdownContainer"] {
         background-color: #262730;
@@ -82,7 +73,7 @@ st.markdown("""
     <hr style="border-color: #444;">
 """, unsafe_allow_html=True)
 
-
+# Text processing
 def clean_field_name(field_name):
     if not isinstance(field_name, str):
         return "Unknown Field"
@@ -90,16 +81,14 @@ def clean_field_name(field_name):
     field_name = re.sub(' +', ' ', field_name)
     field_name = ' '.join(word.capitalize() for word in field_name.split())
     field_name = field_name.replace("Po ", "Placement Officer ")
-    field_name = field_name.replace("Ug", "UG")
-    field_name = field_name.replace("Pg", "PG")
+    field_name = field_name.replace("Ug", "UG").replace("Pg", "PG")
     field_name = field_name.replace("Perc ", "% ")
     return field_name
 
 def process_row(row):
     description = ""
-    institution_name_col = 'Institution Name'
-    institution_name = row.get(institution_name_col, '').strip()
-
+    institution_name_col = next((col for col in row if col.strip().lower() == 'institution name'), None)
+    institution_name = row.get(institution_name_col, '').strip() if institution_name_col else ''
     if institution_name:
         description += f"Institution: {institution_name}."
     else:
@@ -108,43 +97,45 @@ def process_row(row):
     for field_name, field_value in row.items():
         if field_name == institution_name_col:
             continue
-        if field_value is None: continue
+        if field_value is None:
+            continue
         field_value_str = str(field_value).strip()
         if not field_value_str or field_value_str.lower() in ['n', 'no', 'nil', 'na', 'n/a', 'nan']:
             continue
         clean_name = clean_field_name(field_name)
         description += f" {clean_name}: {field_value_str}."
-
     return description.strip()
 
 def generate_metadata_from_csv(csv_filepath, output_txt_path):
     if os.path.exists(output_txt_path):
-        print(f"'{output_txt_path}' already exists. Skipping generation.")
         st.toast(f"Using existing data index.", icon="ℹ️")
         return
 
-    print(f"Generating descriptions from '{csv_filepath}'...")
     st.toast(f"Processing {csv_filepath} for search index...", icon="⏳")
     start_time = time.time()
-    try:
-        with open(csv_filepath, 'r', encoding='latin-1') as csvfile:
+
+    def try_read_csv(encoding):
+        with open(csv_filepath, 'r', encoding=encoding) as csvfile:
             content = csvfile.read()
             if content.startswith('\ufeff'):
                 content = content[1:]
-            reader = list(csv.DictReader(content.splitlines()))
+            return list(csv.DictReader(content.splitlines()))
+
+    try:
+        try:
+            reader = try_read_csv('utf-8-sig')
+        except UnicodeDecodeError:
+            reader = try_read_csv('cp1252')
 
         if not reader:
-            st.error(f"CSV file '{csv_filepath}' appears to be empty or couldn't be read properly.")
+            st.error(f"CSV file '{csv_filepath}' is empty or unreadable.")
             return
 
-        paragraphs = []
-        for row in reader:
-            result = process_row(row)
-            if result is not None:
-                paragraphs.append(result)
+        normalized_rows = [{k.strip(): v for k, v in row.items()} for row in reader]
+        paragraphs = [process_row(row) for row in normalized_rows if process_row(row) is not None]
 
         if not paragraphs:
-            st.error(f"No valid descriptions could be generated from '{csv_filepath}'. Check the file content and 'Institution Name' column.")
+            st.error("No valid descriptions generated. Check CSV content and column headers.")
             return
 
         with open(output_txt_path, 'w', encoding='utf-8') as outfile:
@@ -153,86 +144,33 @@ def generate_metadata_from_csv(csv_filepath, output_txt_path):
                 if i < len(paragraphs) - 1:
                     outfile.write('-' * 40 + '\n')
 
-        end_time = time.time()
-        print(f"Finished generating descriptions to '{output_txt_path}' in {end_time - start_time:.2f} seconds.")
         st.toast(f"Data processing complete!", icon="✅")
 
-    except UnicodeDecodeError:
-        try:
-            with open(csv_filepath, 'r', encoding='cp1252') as csvfile:
-                content = csvfile.read()
-                if content.startswith('\ufeff'):
-                    content = content[1:]
-                reader = list(csv.DictReader(content.splitlines()))
-
-            if not reader:
-                st.error(f"CSV file '{csv_filepath}' appears to be empty or couldn't be read properly (second attempt).")
-                return
-
-            paragraphs = []
-            for row in reader:
-                result = process_row(row)
-                if result is not None:
-                    paragraphs.append(result)
-
-            if not paragraphs:
-                st.error(f"No valid descriptions could be generated from '{csv_filepath}' (second attempt). Check the file content and 'Institution Name' column.")
-                return
-
-            with open(output_txt_path, 'w', encoding='utf-8') as outfile:
-                for i, paragraph in enumerate(paragraphs):
-                    outfile.write(paragraph + '\n')
-                    if i < len(paragraphs) - 1:
-                        outfile.write('-' * 40 + '\n')
-
-            end_time = time.time()
-            print(f"Finished generating descriptions to '{output_txt_path}' (second attempt) in {end_time - start_time:.2f} seconds.")
-            st.toast(f"Data processing complete!", icon="✅")
-
-        except Exception as e2:
-            st.error(f"❌ Error processing CSV file '{csv_filepath}' with multiple encodings: {e2}")
-            print(f"Error during CSV processing (alternative encoding): {e2}")
     except FileNotFoundError:
-        st.error(f"❌ Error: CSV file '{csv_filepath}' not found.")
-        print(f"Error: File not found at {csv_filepath}")
+        st.error(f"❌ File not found: {csv_filepath}")
     except Exception as e:
-        st.error(f"❌ Error processing CSV file '{csv_filepath}': {e}")
-        print(f"Error during CSV processing: {e}")
+        st.error(f"❌ Error processing CSV: {e}")
 
 @st.cache_resource(show_spinner="Loading knowledge base...")
 def load_data_and_embeddings():
     if not os.path.exists(TXT_FILE):
-        st.error(f"Description file '{TXT_FILE}' not found. Please ensure it was generated correctly from the CSV.")
+        st.error(f"Missing text file '{TXT_FILE}'.")
         return None, None, None
-
     try:
         with open(TXT_FILE, 'r', encoding='utf-8') as file:
-            content = file.read()
-            texts = content.split('-' * 40)
-        texts = [text.strip().replace('\n', ' ') for text in texts if text.strip()]
-
+            texts = [text.strip().replace('\n', ' ') for text in file.read().split('-' * 40) if text.strip()]
         if not texts:
-            st.error(f"No text descriptions found in '{TXT_FILE}'. Check the generation process.")
+            st.error(f"No descriptions found in '{TXT_FILE}'.")
             return None, None, None
 
-        print(f"Loading embedding model '{EMBEDDING_MODEL_NAME}'...")
         embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-
-        print(f"Generating embeddings for {len(texts)} text snippets...")
         embeddings = embedding_model.encode(texts, show_progress_bar=False)
-
-        print("Building FAISS index...")
         index = faiss.IndexFlatL2(embeddings.shape[1])
         index.add(np.array(embeddings).astype('float32'))
-
-        print("Knowledge base loaded successfully.")
         return embedding_model, texts, index
-
     except Exception as e:
-        st.error(f"❌ Failed to load or build the knowledge base: {e}")
-        print(f"Error during embedding/indexing: {e}")
+        st.error(f"❌ Failed to build index: {e}")
         return None, None, None
-
 
 def retrieve_relevant_context(query, embedding_model, index, texts, top_k):
     if index is None or embedding_model is None:
@@ -241,53 +179,36 @@ def retrieve_relevant_context(query, embedding_model, index, texts, top_k):
         query_emb = embedding_model.encode([query])
         distances, indices = index.search(np.array(query_emb).astype('float32'), top_k)
         valid_indices = [i for i in indices[0] if i != -1 and i < len(texts)]
-        context = "\n\n".join([texts[i] for i in valid_indices])
-        return context
+        return "\n\n".join([texts[i] for i in valid_indices])
     except Exception as e:
-        print(f"Error during context retrieval: {e}")
         return f"Error retrieving context: {e}"
-
 
 def ask_gemini_with_context(context, question):
     if not gemini_configured or llm_model is None:
-        return "❌ Error: Gemini AI model is not configured or available."
+        return "❌ Gemini AI model not configured."
 
     prompt = f"""
-You are an expert AI assistant specializing in providing information about IHRD college placements based *only* on the provided context.
+You are an AI assistant specializing in IHRD college placements.
 
-**Instructions:**
-1. Analyze the User's Question below.
-2. Carefully examine the Provided Context.
-3. Answer the User's Question accurately using *only* information found within the Provided Context.
-4. If the context does not contain the answer, explicitly state that the specific information is not available in the provided data. Do not invent or assume details.
-5. Present the answer clearly and concisely. Use bullet points for lists if appropriate.
-6. Do not mention the context itself in your final answer. Just answer the question.
-7. Expand common abbreviations if possible (e.g., MEC -> Model Engineering College, if identifiable from context).
+Use only the context below to answer the user's question.
 
-**Provided Context:**
+Context:
 ---
 {context}
 ---
 
-**User's Question:**
+User's Question:
 {question}
 
-**Answer:**
-"""
+Answer:"""
+
     try:
         response = llm_model.generate_content(prompt)
-        if response.parts:
-            return response.text
-        elif response.prompt_feedback.block_reason:
-            return f"⚠️ Response blocked due to: {response.prompt_feedback.block_reason.name}. Try rephrasing your question."
-        else:
-            return "❓ Sorry, I couldn't generate a response for that query based on the available information."
-
+        return response.text if response.parts else "⚠️ Unable to generate a response."
     except Exception as e:
-        print(f"❌ Gemini API error: {e}")
-        return f"❌ An error occurred while contacting the AI model: {e}"
+        return f"❌ Error contacting Gemini: {e}"
 
-
+# Chat memory
 def save_memory():
     try:
         with open(MEMORY_FILE, "w", encoding="utf-8") as f:
@@ -300,11 +221,7 @@ def load_memory():
         try:
             with open(MEMORY_FILE, "r", encoding="utf-8") as f:
                 st.session_state["messages"] = json.load(f)
-        except json.JSONDecodeError:
-            print(f"Error decoding JSON from {MEMORY_FILE}. Starting fresh.")
-            st.session_state["messages"] = []
-        except Exception as e:
-            print(f"Error loading memory: {e}")
+        except:
             st.session_state["messages"] = []
     else:
         st.session_state["messages"] = []
@@ -323,7 +240,6 @@ if user_input:
     with st.spinner("Thinking..."):
         context = retrieve_relevant_context(user_input, embedding_model, index, texts, TOP_K)
         response = ask_gemini_with_context(context, user_input)
-
         st.session_state["messages"].append({"role": "user", "content": user_input})
         st.session_state["messages"].append({"role": "assistant", "content": response})
         save_memory()
@@ -333,31 +249,25 @@ with chat_placeholder:
     for msg in st.session_state.get("messages", []):
         st.chat_message(msg["role"]).markdown(msg["content"])
 
-    with st.sidebar:
-        st.subheader("Chat History")
-        if st.session_state.get("messages"):
-            for i, msg in enumerate(st.session_state["messages"]):
-                with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
-            if st.button("Clear Chat History", key="clear_history"):
-                st.session_state["messages"] = []
-                save_memory()
-                st.rerun()
+with st.sidebar:
+    st.subheader("Chat History")
+    if st.session_state.get("messages"):
+        for msg in st.session_state["messages"]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+        if st.button("Clear Chat History"):
+            st.session_state["messages"] = []
+            save_memory()
+            st.rerun()
 
-        st.markdown("---")
-        st.markdown("### Download Chat History")
-        if st.session_state.get("messages"):
-            history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state["messages"]])
-            b64 = base64.b64encode(history_text.encode()).decode()
-            st.download_button(
-                label="Download Chat",
-                data=history_text,
-                file_name="placement_chat_history.txt",
-                mime="text/plain",
-            )
-        else:
-            st.info("No chat history to download.")
+    st.markdown("---")
+    st.markdown("### Download Chat History")
+    if st.session_state.get("messages"):
+        history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state["messages"]])
+        st.download_button("Download Chat", data=history_text, file_name="placement_chat_history.txt", mime="text/plain")
+    else:
+        st.info("No chat history to download.")
 
-        st.markdown("---")
-        st.markdown(f"Powered by: <a href='https://ai.google.dev/gemini' target='_blank'>Gemini</a> + <a href='https://www.sbert.net/' target='_blank'>Sentence Transformers</a> + <a href='https://faiss.ai/' target='_blank'>FAISS</a>", unsafe_allow_html=True)
-        st.markdown(f"Running on Streamlit Cloud in {time.tzname[0]} (UTC{time.strftime('%z')})")
+    st.markdown("---")
+    st.markdown("Powered by: [Gemini](https://ai.google.dev/gemini) + [Sentence Transformers](https://www.sbert.net/) + [FAISS](https://faiss.ai/)", unsafe_allow_html=True)
+    st.markdown(f"Running in {time.tzname[0]} (UTC{time.strftime('%z')})")
