@@ -165,11 +165,17 @@ def generate_metadata_from_csv(csv_filepath, output_txt_path):
             st.error(f"CSV file '{csv_filepath}' appears to be empty or couldn't be read properly.")
             return
 
+        print(f"Number of rows read from CSV: {len(reader)}") # DEBUGGING
+
         paragraphs = []
         for row in reader:
+            print(f"Processing row: {row}") # DEBUGGING
             result = process_row(row)
+            print(f"Result of processing: {result}") # DEBUGGING
             if result is not None:
                 paragraphs.append(result)
+
+        print(f"Number of valid paragraphs generated: {len(paragraphs)}") # DEBUGGING
 
         if not paragraphs:
             st.error(f"No valid descriptions could be generated from '{csv_filepath}'. Check the file content and 'Institution Name' column.")
@@ -198,11 +204,17 @@ def generate_metadata_from_csv(csv_filepath, output_txt_path):
                 st.error(f"CSV file '{csv_filepath}' appears to be empty or couldn't be read properly (second attempt).")
                 return
 
+            print(f"Number of rows read from CSV (attempt 2): {len(reader)}") # DEBUGGING
+
             paragraphs = []
             for row in reader:
+                print(f"Processing row (attempt 2): {row}") # DEBUGGING
                 result = process_row(row)
+                print(f"Result of processing (attempt 2): {result}") # DEBUGGING
                 if result is not None:
                     paragraphs.append(result)
+
+            print(f"Number of valid paragraphs generated (attempt 2): {len(paragraphs)}") # DEBUGGING
 
             if not paragraphs:
                 st.error(f"No valid descriptions could be generated from '{csv_filepath}' (second attempt). Check the file content and 'Institution Name' column.")
@@ -361,13 +373,4 @@ def load_memory():
 # --- Main App Logic ---
 
 # 1. Generate descriptions from CSV if TXT doesn't exist
-generate_metadata_from_csv(CSV_FILE, TXT_FILE)
-
-# 2. Load data, create embeddings and FAISS index
-embedding_model, texts, index = load_data_and_embeddings()
-
-# 3. Initialize chat history (load from memory or start fresh)
-if "messages" not in st.session_state:
-    load_memory()
-
-# 4. Add
+generate_metadata_from_csv(CSV_FILE,
