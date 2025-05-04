@@ -3,8 +3,8 @@ sentence-transformers==2.2.2
 faiss-cpu
 numpy
 google-generativeai
-torch
-torchaudio
-torchvision
-huggingface_hub==0.10.0  # Or try a slightly newer one like 0.15.0
-transformers==4.21.0
+torch  # Included in case it's needed by sentence-transformers in the cloud
+torchaudio # Included in case it's needed by torch
+torchvision # Included in case it's needed by torch
+huggingface_hub==0.10.0 # Pinned version based on earlier discussion
+transformers==4.21.0 # Pinned version based on earlier discussion
