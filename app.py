@@ -2,7 +2,7 @@
 import csv
 import re
 import multiprocessing
-from multiprocessing import Pool
+# from multiprocessing import Pool # Commenting out for now
 import streamlit as st
 import faiss
 from sentence_transformers import SentenceTransformer
@@ -144,8 +144,8 @@ def process_row(row):
 
     return description.strip()
 
-def generate_metadata_from_csv(csv_filepath, output_txt_path, num_workers=None):
-    """Reads CSV, processes rows in parallel, writes descriptions to TXT file if it doesn't exist."""
+def generate_metadata_from_csv(csv_filepath, output_txt_path):
+    """Reads CSV, processes rows sequentially, writes descriptions to TXT file if it doesn't exist."""
     if os.path.exists(output_txt_path):
         print(f"'{output_txt_path}' already exists. Skipping generation.")
         st.toast(f"Using existing data index.", icon="ℹ️")
@@ -165,12 +165,11 @@ def generate_metadata_from_csv(csv_filepath, output_txt_path, num_workers=None):
             st.error(f"CSV file '{csv_filepath}' appears to be empty or couldn't be read properly.")
             return
 
-        # Use multiprocessing pool to process rows faster
-        with Pool(processes=num_workers or multiprocessing.cpu_count()) as pool:
-            results = pool.map(process_row, reader)
-
-        # Filter out None results (rows skipped, e.g., missing institution name)
-        paragraphs = [p for p in results if p is not None]
+        paragraphs = []
+        for row in reader:
+            result = process_row(row)
+            if result is not None:
+                paragraphs.append(result)
 
         if not paragraphs:
             st.error(f"No valid descriptions could be generated from '{csv_filepath}'. Check the file content and 'Institution Name' column.")
@@ -199,12 +198,11 @@ def generate_metadata_from_csv(csv_filepath, output_txt_path, num_workers=None):
                 st.error(f"CSV file '{csv_filepath}' appears to be empty or couldn't be read properly (second attempt).")
                 return
 
-            # Use multiprocessing pool to process rows faster
-            with Pool(processes=num_workers or multiprocessing.cpu_count()) as pool:
-                results = pool.map(process_row, reader)
-
-            # Filter out None results (rows skipped, e.g., missing institution name)
-            paragraphs = [p for p in results if p is not None]
+            paragraphs = []
+            for row in reader:
+                result = process_row(row)
+                if result is not None:
+                    paragraphs.append(result)
 
             if not paragraphs:
                 st.error(f"No valid descriptions could be generated from '{csv_filepath}' (second attempt). Check the file content and 'Institution Name' column.")
@@ -372,4 +370,4 @@ embedding_model, texts, index = load_data_and_embeddings()
 if "messages" not in st.session_state:
     load_memory()
 
-# 4. Add welcome
+# 4. Add
