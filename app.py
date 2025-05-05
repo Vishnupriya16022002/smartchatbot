@@ -1,15 +1,20 @@
 import csv
 import re
+import multiprocessing
+from multiprocessing import Pool
 import streamlit as st
 import faiss
 from sentence_transformers import SentenceTransformer
 import numpy as np
+import requests
 import os
 import time
 import json
 import google.generativeai as genai
-import base64
+from difflib import SequenceMatcher
+from difflib import get_close_matches
 
+# --- Streamlit config ---
 st.set_page_config(
     page_title="🎓 Placement Info Assistant",
     page_icon="🤖",
@@ -17,25 +22,10 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-st.markdown("""<meta name="viewport" content="width=device-width, initial-scale=1.0">""", unsafe_allow_html=True)
+st.markdown("""
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+""", unsafe_allow_html=True)
 
-CSV_FILE = 'placement.csv'
-TXT_FILE = 'institution_descriptions_placement.txt'
-MEMORY_FILE = "chat_memory_placement.json"
-EMBEDDING_MODEL_NAME = 'all-MiniLM-L6-v2'
-TOP_K = 5
-
-# Setup Gemini
-try:
-    genai.configure(api_key=st.secrets["api_key"])
-    llm_model = genai.GenerativeModel('gemini-1.5-flash')
-    gemini_configured = True
-except Exception as e:
-    st.error(f"💥 Failed to configure Google AI: {e}")
-    gemini_configured = False
-    llm_model = None
-
-# Styling & Header
 st.markdown("""
     <style>
     .centered-title {
@@ -47,227 +37,248 @@ st.markdown("""
     .centered-subtitle {
         text-align: center;
         font-size: 1.2em;
-        color: #AAA;
+        color: #555;
         margin-bottom: 1em;
     }
-    [data-testid="stChatMessage"] > div[data-testid="stMarkdownContainer"] {
-        background-color: #262730;
-        border: 1px solid #333;
-        border-radius: 18px;
-        padding: 10px 15px;
-        float: left;
-    }
-    [data-testid="stChatMessage"].user-message > div[data-testid="stMarkdownContainer"] {
-        background-color: #0b8e44;
-        color: white;
-        border-radius: 18px;
-        padding: 10px 15px;
-        float: right;
-    }
     </style>
+
     <div class="centered-title">🎓 Placement Info Assistant</div>
     <div class="centered-subtitle">
-        Ask questions about IHRD college placements (Powered by Gemini & Semantic Search)
-        <br><span style="font-size: 0.8em; color: #888;">Enter queries like "Placement percentage at MEC" or "Companies visiting CAS Mavelikara"</span>
+        An Intelligent Chatbot for IHRD College Placement Details
+        <br>Powered by FAISS, Sentence Transformers, and Google-GenerativeAi (Gemini Flash)
     </div>
-    <hr style="border-color: #444;">
+    <hr>
 """, unsafe_allow_html=True)
 
-# Text processing
+st.markdown("""
+    <style>
+    .footer {
+        position: fixed;
+        left: 0;
+        bottom: 0;
+        width: 100%;
+        color: #999;
+        text-align: center;
+        font-size: 0.85em;
+        padding: 10px 0;
+        border-top: 1px solid #eee;
+        z-index: 100;
+    }
+    </style>
+    <div class="footer">
+        © 2025 Placement Info Assistant | Built with ❤️ by COLLEGE OF APPLIED SCIENCE MAVELIKKARA
+    </div>
+""", unsafe_allow_html=True)
+
+# --- Configuration ---
+CSV_FILE = 'placement.csv'
+MEMORY_FILE = "chat_memory.json"
+
+# --- Gemini Setup ---
+genai.configure(api_key=st.secrets["api_key"])
+llm_model = genai.GenerativeModel('gemini-2.0-flash')
+
+# --- Utilities ---
 def clean_field_name(field_name):
-    if not isinstance(field_name, str):
-        return "Unknown Field"
-    field_name = field_name.replace('_', ' ').replace('\n', ' ').strip()
+    field_name = field_name.replace('_', ' ').replace('\n', ' ').strip().capitalize()
     field_name = re.sub(' +', ' ', field_name)
-    field_name = ' '.join(word.capitalize() for word in field_name.split())
-    field_name = field_name.replace("Po ", "Placement Officer ")
-    field_name = field_name.replace("Ug", "UG").replace("Pg", "PG")
-    field_name = field_name.replace("Perc ", "% ")
     return field_name
 
+def get_all_field_names(csv_path):
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        return [clean_field_name(field) for field in reader.fieldnames]
+
+def match_fields_from_query(query, field_names, cutoff=0.5):
+    query_lower = query.lower()
+    matches = [f for f in field_names if any(word in f.lower() for word in query_lower.split())]
+    if not matches:
+        matches = get_close_matches(query_lower, field_names, n=3, cutoff=cutoff)
+    return matches
+
 def process_row(row):
-    description = ""
-    institution_name_col = next((col for col in row if col.strip().lower() == 'institution name'), None)
-    institution_name = row.get(institution_name_col, '').strip() if institution_name_col else ''
-    if institution_name:
-        description += f"Institution: {institution_name}."
-    else:
-        return None
-
+    data = {}
+    institution_name = row.get('Institution Name ', '').strip()
+    data["Institution Name"] = institution_name if institution_name else "Not Available"
     for field_name, field_value in row.items():
-        if field_name == institution_name_col:
-            continue
-        if field_value is None:
-            continue
-        field_value_str = str(field_value).strip()
-        if not field_value_str or field_value_str.lower() in ['n', 'no', 'nil', 'na', 'n/a', 'nan']:
-            continue
-        clean_name = clean_field_name(field_name)
-        description += f" {clean_name}: {field_value_str}."
-    return description.strip()
+        if field_value and field_value.lower() not in ['n', 'no', 'nil']:
+            clean_name = clean_field_name(field_name)
+            data[clean_name] = field_value.strip()
+    return data
 
-def generate_metadata_from_csv(csv_filepath, output_txt_path):
-    if os.path.exists(output_txt_path):
-        st.toast(f"Using existing data index.", icon="ℹ️")
-        return
-
-    st.toast(f"Processing {csv_filepath} for search index...", icon="⏳")
-    start_time = time.time()
-
-    def try_read_csv(encoding):
-        with open(csv_filepath, 'r', encoding=encoding) as csvfile:
-            content = csvfile.read()
-            if content.startswith('\ufeff'):
-                content = content[1:]
-            return list(csv.DictReader(content.splitlines()))
-
-    try:
-        try:
-            reader = try_read_csv('utf-8-sig')
-        except UnicodeDecodeError:
-            reader = try_read_csv('cp1252')
-
-        if not reader:
-            st.error(f"CSV file '{csv_filepath}' is empty or unreadable.")
-            return
-
-        normalized_rows = [{k.strip(): v for k, v in row.items()} for row in reader]
-        paragraphs = [process_row(row) for row in normalized_rows if process_row(row) is not None]
-
-        if not paragraphs:
-            st.error("No valid descriptions generated. Check CSV content and column headers.")
-            return
-
-        with open(output_txt_path, 'w', encoding='utf-8') as outfile:
-            for i, paragraph in enumerate(paragraphs):
-                outfile.write(paragraph + '\n')
-                if i < len(paragraphs) - 1:
-                    outfile.write('-' * 40 + '\n')
-
-        st.toast(f"Data processing complete!", icon="✅")
-
-    except FileNotFoundError:
-        st.error(f"❌ File not found: {csv_filepath}")
-    except Exception as e:
-        st.error(f"❌ Error processing CSV: {e}")
-
-@st.cache_resource(show_spinner="Loading knowledge base...")
+@st.cache_resource
 def load_data_and_embeddings():
-    if not os.path.exists(TXT_FILE):
-        st.error(f"Missing text file '{TXT_FILE}'.")
-        return None, None, None
-    try:
-        with open(TXT_FILE, 'r', encoding='utf-8') as file:
-            texts = [text.strip().replace('\n', ' ') for text in file.read().split('-' * 40) if text.strip()]
-        if not texts:
-            st.error(f"No descriptions found in '{TXT_FILE}'.")
-            return None, None, None
+    with open(CSV_FILE, 'r', encoding='utf-8') as csvfile:
+        reader = list(csv.DictReader(csvfile))
+        processed_data = [process_row(row) for row in reader]
 
-        embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-        embeddings = embedding_model.encode(texts, show_progress_bar=False)
-        index = faiss.IndexFlatL2(embeddings.shape[1])
-        index.add(np.array(embeddings).astype('float32'))
-        return embedding_model, texts, index
-    except Exception as e:
-        st.error(f"❌ Failed to build index: {e}")
-        return None, None, None
+    texts = [" ".join(f"{k}: {v}" for k, v in item.items()) for item in processed_data]
+    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+    embeddings = embedding_model.encode(texts, show_progress_bar=True)
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    index.add(np.array(embeddings))
+    return embedding_model, processed_data, texts, index
 
-def retrieve_relevant_context(query, embedding_model, index, texts, top_k):
-    if index is None or embedding_model is None:
-        return "Error: Knowledge base not loaded."
-    try:
+
+def similarity(s1, s2):
+    return SequenceMatcher(None, s1, s2).ratio()
+
+def retrieve_filtered_context(query, top_k, field_names, processed_data):
+    query_lower = query.lower()
+    relevant_institutions = {}
+    max_similarity_score = 0.8  # Threshold for considering a close match
+
+    for row in processed_data:
+        institution_name = row.get('Institution Name', 'Unknown')
+        name_lower = institution_name.lower()
+        similarity_score = similarity(query_lower, name_lower)
+
+        if similarity_score >= max_similarity_score or query_lower in name_lower or name_lower in query_lower:
+            if institution_name not in relevant_institutions:
+                relevant_institutions[institution_name] = {"Institution": institution_name}
+                if "District" in row:
+                    relevant_institutions[institution_name]["District"] = row.get("District")
+
+            for field in field_names:
+                if any(placement_keyword in field.lower() for placement_keyword in ['placement', 'recruiters', 'package', 'placed', 'contact']):
+                    value = row.get(field)
+                    if value and field not in relevant_institutions[institution_name]:
+                        relevant_institutions[institution_name][field] = value
+
+    filtered_context = []
+    for institution_data in relevant_institutions.values():
+        context_lines = [f"{key}: {value}" for key, value in institution_data.items() if value]
+        filtered_context.append("\n".join(context_lines))
+
+    # If no close match found, fall back to a more general semantic search (optional)
+    if not filtered_context:
         query_emb = embedding_model.encode([query])
-        distances, indices = index.search(np.array(query_emb).astype('float32'), top_k)
-        valid_indices = [i for i in indices[0] if i != -1 and i < len(texts)]
-        return "\n\n".join([texts[i] for i in valid_indices])
-    except Exception as e:
-        return f"Error retrieving context: {e}"
+        index = faiss.IndexFlatL2(embedding_model.get_sentence_embedding_dimension())
+        texts = [" ".join(f"{k}: {v}" for k, v in item.items()) for item in processed_data]
+        embeddings = embedding_model.encode(texts)
+        index.add(np.array(embeddings))
+        distances, indices = index.search(query_emb, min(top_k, len(processed_data)))
 
-def ask_gemini_with_context(context, question):
-    if not gemini_configured or llm_model is None:
-        return "❌ Gemini AI model not configured."
+        for i in indices[0]:
+            row = processed_data[i]
+            institution_name = row.get('Institution Name', 'Unknown')
+            if institution_name not in relevant_institutions:
+                relevant_institutions[institution_name] = {"Institution": institution_name}
+                if "District" in row:
+                    relevant_institutions[institution_name]["District"] = row.get("District")
+                for field in field_names:
+                    if any(placement_keyword in field.lower() for placement_keyword in ['placement', 'recruiters', 'package', 'placed', 'contact']):
+                        value = row.get(field)
+                        if value and field not in relevant_institutions[institution_name]:
+                            relevant_institutions[institution_name][field] = value
+        filtered_context = []
+        for institution_data in relevant_institutions.values():
+            context_lines = [f"{key}: {value}" for key, value in institution_data.items() if value]
+            filtered_context.append("\n".join(context_lines))
+
+    return "\n\n".join(filtered_context)
+def ask_gemini(context, question):
+    history = ""
+    for msg in st.session_state["messages"][-4:]:
+        if msg["role"] == "user":
+            history += f"\nUser: {msg['content']}"
+        elif msg["role"] == "assistant":
+            history += f"\nAssistant: {msg['content']}"
 
     prompt = f"""
-You are an AI assistant specializing in IHRD college placements.
+You are a knowledgeable and friendly assistant specializing in placement details for IHRD colleges.
+Use only the provided context to generate helpful and natural responses.
+If placement-related information is unavailable in the data, simply skip it.
 
-Use only the context below to answer the user's question.
-
-Context:
----
+### CONTEXT:
 {context}
----
 
-User's Question:
+### CHAT HISTORY:
+{history}
+
+### USER QUESTION:
 {question}
 
-Answer:"""
+### IMPORTANT:
+- Answer using only relevant fields from the context.
+- Always mention the **institution name** along with placement information.
+- If there are multiple colleges with similar stats, list them all clearly.
+- Do not mention missing data.
+- Focus **only** on placement-related details like recruiters, packages, placement rates, and contact information. Avoid mentioning courses or other non-placement details.
+- Use a friendly, informative tone.
+
+"""
+    print("\n\n--- FINAL PROMPT TO GEMINI ---\n")
+    print(prompt)
+    print("\n--- END PROMPT ---\n")
 
     try:
         response = llm_model.generate_content(prompt)
-        return response.text if response.parts else "⚠️ Unable to generate a response."
+        return response.text
     except Exception as e:
-        return f"❌ Error contacting Gemini: {e}"
+        return f"❌ Gemini error: {e}"
 
-# Chat memory
+# --- Memory persistence ---
 def save_memory():
-    try:
-        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(st.session_state["messages"], f, indent=2)
-    except Exception as e:
-        print(f"Error saving memory: {e}")
+    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(st.session_state["messages"], f)
 
 def load_memory():
     if os.path.exists(MEMORY_FILE):
-        try:
-            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-                st.session_state["messages"] = json.load(f)
-        except:
-            st.session_state["messages"] = []
-    else:
-        st.session_state["messages"] = []
+        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+            st.session_state["messages"] = json.load(f)
+
+# --- Main App Logic ---
+embedding_model, processed_data, texts, index = load_data_and_embeddings()
+all_field_names = get_all_field_names(CSV_FILE)
+TOP_K = len(texts)
 
 if "messages" not in st.session_state:
+    st.session_state["messages"] = []
     load_memory()
 
-generate_metadata_from_csv(CSV_FILE, TXT_FILE)
-embedding_model, texts, index = load_data_and_embeddings()
+if not st.session_state["messages"]:
+    welcome_message = "👋 Hello! Ask me anything about IHRD college placements."
+    st.session_state["messages"].append({"role": "assistant", "content": welcome_message})
+    save_memory()
 
-st.sidebar.header("Chat with the Assistant")
-user_input = st.sidebar.text_input("Your question:", key="user_input")
-chat_placeholder = st.empty()
-
-if user_input:
-    with st.spinner("Thinking..."):
-        context = retrieve_relevant_context(user_input, embedding_model, index, texts, TOP_K)
-        response = ask_gemini_with_context(context, user_input)
-        st.session_state["messages"].append({"role": "user", "content": user_input})
-        st.session_state["messages"].append({"role": "assistant", "content": response})
+# --- Sidebar ---
+with st.sidebar:
+    st.header("🕑 Chat History")
+    if st.session_state["messages"]:
+        for msg in st.session_state["messages"]:
+            st.markdown(f"**{msg['role'].capitalize()}**: {msg['content'][:30]}...")
+    else:
+        st.markdown("*No chats yet.*")
+    if st.button("🧹 Clear Chat"):
+        st.session_state["messages"] = []
         save_memory()
         st.rerun()
+    if st.button("📥 Download Chat"):
+        if st.session_state["messages"]:
+            chat_text = "\n\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state["messages"]])
+            st.download_button("Download as TXT", data=chat_text, file_name="chat_history.txt", mime="text/plain")
 
-with chat_placeholder:
-    for msg in st.session_state.get("messages", []):
-        st.chat_message(msg["role"]).markdown(msg["content"])
+# --- Chat Display ---
+for msg in st.session_state["messages"]:
+    with st.chat_message(msg["role"]):
+        st.markdown(f"<div class='chat-bubble'>{msg['content']}</div>", unsafe_allow_html=True)
 
-with st.sidebar:
-    st.subheader("Chat History")
-    if st.session_state.get("messages"):
-        for msg in st.session_state["messages"]:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-        if st.button("Clear Chat History"):
-            st.session_state["messages"] = []
-            save_memory()
-            st.rerun()
+user_query = st.chat_input("Type your question about placements...")
 
-    st.markdown("---")
-    st.markdown("### Download Chat History")
-    if st.session_state.get("messages"):
-        history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state["messages"]])
-        st.download_button("Download Chat", data=history_text, file_name="placement_chat_history.txt", mime="text/plain")
-    else:
-        st.info("No chat history to download.")
-
-    st.markdown("---")
-    st.markdown("Powered by: [Gemini](https://ai.google.dev/gemini) + [Sentence Transformers](https://www.sbert.net/) + [FAISS](https://faiss.ai/)", unsafe_allow_html=True)
-    st.markdown(f"Running in {time.tzname[0]} (UTC{time.strftime('%z')})")
+if user_query:
+    st.session_state["messages"].append({"role": "user", "content": user_query})
+    with st.chat_message("user"):
+        st.markdown(f"<div class='chat-bubble'>{user_query}</div>", unsafe_allow_html=True)
+    with st.spinner("Typing..."):
+        context = retrieve_filtered_context(user_query, top_k=TOP_K, field_names=all_field_names, processed_data=processed_data)
+        raw_answer = ask_gemini(context, user_query)
+    final_answer = ""
+    with st.chat_message("assistant"):
+        answer_placeholder = st.empty()
+        for i in range(len(raw_answer)):
+            final_answer = raw_answer[:i+1]
+            answer_placeholder.markdown(f"<div class='chat-bubble'>{final_answer}</div>", unsafe_allow_html=True)
+            time.sleep(0.01)
+    st.session_state["messages"].append({"role": "assistant", "content": raw_answer})
+    save_memory()
