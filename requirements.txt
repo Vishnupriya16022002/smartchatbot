@@ -1,4 +1,4 @@
-multiprocessing
+
 streamlit
 faiss-cpu
 sentence-transformers
